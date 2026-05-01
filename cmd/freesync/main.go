@@ -2,12 +2,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
 	"github.com/DelfsEngineering/FreeSync/internal/config"
+	"github.com/DelfsEngineering/FreeSync/internal/run"
 	"github.com/DelfsEngineering/FreeSync/internal/state"
 )
 
@@ -20,11 +23,12 @@ func main() {
 	if statePath == "" {
 		statePath = "data/sync-state.json"
 	}
+	apply := flag.Bool("apply", false, "execute writes (PATCH/POST); default is dry-run")
 	flag.StringVar(&configPath, "config", configPath, "path to JSON config")
 	flag.StringVar(&statePath, "state", statePath, "path to checkpoint file (JSON)")
 	flag.Parse()
 	if len(flag.Args()) < 1 || flag.Args()[0] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: freesync [-config path] [-state path] run")
+		fmt.Fprintln(os.Stderr, "usage: freesync [-config path] [-state path] [-apply] run")
 		os.Exit(2)
 	}
 
@@ -34,7 +38,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Free Sync — config %q\n", configPath)
+	fmt.Printf("Free Sync — config %q apply=%v\n", configPath, *apply)
 	for _, s := range cfg.Servers {
 		fmt.Printf("  server %s: %s (user %s)\n", s.ID, s.URL, s.Username)
 	}
@@ -46,7 +50,6 @@ func main() {
 		fmt.Printf("  checkpoint file: %s (will create on first advance)\n", statePath)
 	}
 
-	// Smoke: checkpoint IO (no OData yet)
 	for _, tbl := range cfg.Tables {
 		if tbl.Name == "" {
 			continue
@@ -59,5 +62,13 @@ func main() {
 		}
 	}
 
-	fmt.Println("run: OData sync not wired yet — domain tests cover window/plan/checkpoint.")
+	ctx := context.Background()
+	log.SetOutput(os.Stdout)
+	log.SetFlags(0)
+	err = run.Once(ctx, cfg, run.Options{Apply: *apply, StatePath: statePath, Logger: log.Default()})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "run: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("run: ok")
 }

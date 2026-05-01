@@ -9,13 +9,13 @@ import (
 
 // Config matches the committed example shape; unknown JSON keys are ignored.
 type Config struct {
-	Servers        []Server      `json:"servers"`
-	Tables         []TableSpec   `json:"tables"`
-	Defaults       Defaults      `json:"defaults"`
-	OverlapMinutes int           `json:"overlapMinutes"`
-	InitialLookback string       `json:"initialLookback"`
-	MaxLookback    string        `json:"maxLookback"`
-	SchemaMode     string        `json:"schemaMode"`
+	Servers         []Server    `json:"servers"`
+	Tables          []TableSpec `json:"tables"`
+	Defaults        Defaults    `json:"defaults"`
+	OverlapMinutes  int         `json:"overlapMinutes"`
+	InitialLookback string      `json:"initialLookback"`
+	MaxLookback     string      `json:"maxLookback"`
+	SchemaMode      string      `json:"schemaMode"`
 }
 
 type Server struct {
@@ -65,6 +65,13 @@ func (c *Config) Validate() error {
 	if c.Servers[0].ID == c.Servers[1].ID {
 		return fmt.Errorf("servers must have distinct ids")
 	}
+	seen := make(map[string]bool)
+	for _, s := range c.Servers {
+		seen[s.ID] = true
+	}
+	if !seen["blue"] || !seen["green"] {
+		return fmt.Errorf("servers must include id \"blue\" and \"green\"")
+	}
 	return nil
 }
 
@@ -74,4 +81,17 @@ func (c *Config) Overlap() string {
 		return "10m"
 	}
 	return fmt.Sprintf("%dm", c.OverlapMinutes)
+}
+
+// PKMod returns primary key and modification field names for a table (defaults apply).
+func (c *Config) PKMod(t TableSpec) (pk, mod string) {
+	pk = t.PrimaryKey
+	if pk == "" {
+		pk = c.Defaults.PrimaryKey
+	}
+	mod = t.ModifiedField
+	if mod == "" {
+		mod = c.Defaults.ModifiedField
+	}
+	return pk, mod
 }

@@ -57,3 +57,18 @@ Use OData standard query options on entity sets (see guide sections **Query opti
 ## Security note for repositories
 
 Do **not** commit host-specific URLs with real passwords. Use `config/dev.example.json` in git and keep secrets in **gitignored** `config/dev.local.json`.
+
+## FileMaker OData quirks (observed on FileMaker Server OData)
+
+- **`$select=id,field`** — comma-separated lists can **fail** URL parsing (treats `id,field` as one name). Free Sync **omits `$select`** for manifest passes and reads keys from full rows.
+- **`$orderby=A asc,B asc`** — comma in `$orderby` can **fail** parsing. Use a **single** order column (e.g. `ModificationTimestamp asc`) for paging.
+- Query encoding — prefer **spaces as `%20`**; avoid `+` for spaces in some deployments.
+
+## Live tests
+
+```bash
+FREESYNC_LIVE=1 go test ./internal/odata -run TestLive -count=1 -v
+```
+
+Requires `config/dev.local.json` (gitignored).
+
