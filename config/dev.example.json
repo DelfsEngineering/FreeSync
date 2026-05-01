@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to config/dev.local.json and fill secrets. dev.local.json is gitignored.",
+  "_comment": "Copy to config/dev.local.json and fill secrets. dev.local.json is gitignored. OData /fmi/odata/v4/{db} is case-sensitive; use the exact name from GET /fmi/odata/v4 on the host.",
   "servers": [
     {
       "id": "blue",
