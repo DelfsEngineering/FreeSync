@@ -14,7 +14,13 @@
       "password": "use-env-or-local-file-not-git"
     }
   ],
-  "tables": [],
+  "tables": [
+    {
+      "name": "People",
+      "primaryKey": "id",
+      "modifiedField": "ModificationTimestamp"
+    }
+  ],
   "defaults": {
     "primaryKey": "id",
     "modifiedField": "ModificationTimestamp"
