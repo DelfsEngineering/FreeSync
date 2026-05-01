@@ -13,7 +13,7 @@ OData path segments are the **catalog name** on the server (case-sensitive), not
 | Role | Use this URL segment on deng3 | Notes |
 |------|--------------------------------|--------|
 | blue | **`BF_DevTeam_Test`** | Capital **T** in `Test`, not `BF_DevTeam_test`. |
-| green | **`BF_Examples`** | Catalog shows `BF_Examples` (not `BBF_Examples`). |
+| green | **`BF_Examples`** | OData catalog on deng3 uses this spelling (with **“Examples”**). The hosted `.fmp12` may be named with a typo such as `BF_Exampels.fmp12`; **URLs must still use the exact segment from `GET /fmi/odata/v4`** — here that is `BF_Examples`, not `BF_Exampels` (which returns **501** if used as the path segment). |
 
 ## Current test results (both target files)
 
