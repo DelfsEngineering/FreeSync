@@ -1,0 +1,26 @@
+{
+  "_comment": "Copy to config/dev.local.json and fill secrets. dev.local.json is gitignored.",
+  "servers": [
+    {
+      "id": "blue",
+      "url": "https://your-host.example/fmi/odata/v4/YourDatabaseBlue",
+      "username": "filemaker_account",
+      "password": "use-env-or-local-file-not-git"
+    },
+    {
+      "id": "green",
+      "url": "https://your-host.example/fmi/odata/v4/YourDatabaseGreen",
+      "username": "filemaker_account",
+      "password": "use-env-or-local-file-not-git"
+    }
+  ],
+  "tables": [],
+  "defaults": {
+    "primaryKey": "id",
+    "modifiedField": "ModificationTimestamp"
+  },
+  "overlapMinutes": 10,
+  "initialLookback": "1d",
+  "maxLookback": "90d",
+  "schemaMode": "intersection"
+}
