@@ -5,3 +5,11 @@
 # Local dev secrets (never commit)
 config/dev.local.json
 **/*.local.json
+
+# Go
+/freesync
+coverage.out
+*.exe
+
+# Python scratch (local experiments only)
+.venv/
