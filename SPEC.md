@@ -323,6 +323,34 @@ No network, no SQLite. Input in, struct out.
 | Adapters    | Correct OData URLs, auth header, pagination loop |
 | E2E         | One container run, real volume + SQLite file (optional) |
 
+### Incremental testing as you build
+
+Ship **small vertical slices** and add tests **alongside each slice** (not only at the end):
+
+| Milestone (example) | What to lock with tests |
+|---------------------|-------------------------|
+| Window + checkpoint only | Window bounds from SQLite state; no OData yet |
+| Manifest client only | Paging, `$filter`, decode to `(id, timestamp)` — stub HTTP |
+| Compare + plan only | Pure tests from fixture manifests |
+| Apply + verify loop | Fake OData counts writes; verify phase replay |
+| Full `run` | Two endpoints (fakes or real FM — below) |
+
+Each milestone should leave **main green** with fast tests; slower tests tagged (`integration`, `fm`) for CI toggles.
+
+### Two FileMaker files (why two)
+
+Bidirectional sync **cannot be honestly exercised against one database**. You need **two hosted `.fmp12` solutions** (or two databases on distinct OData bases) so that:
+
+- **Server A** and **Server B** have **independent state**, drift, and deletes.
+- You can introduce change on **one side only** and prove the other receives it (and the reverse).
+- Blue/green narratives match reality: two files, two URLs in config.
+
+**Development convention:** maintain **dev File A** + **dev File B** (copies of production schema, anonymized data). Point Free Sync’s config at their OData URLs; wipe or reset those files when tests require a clean slate.
+
+### Two fixture files (optional, no FileMaker)
+
+For **fast regression** without spinning FM, keep **checked-in snapshots** (e.g. `testdata/manifest_blue.json`, `testdata/manifest_green.json`) representing manifest rows after a run. Tests feed them into the **compare / verify** logic as golden inputs. This complements—not replaces—integration tests against the two dev files.
+
 ---
 
 *If you hand this to a Go dev, they can build it cleanly with the above test shape.*
