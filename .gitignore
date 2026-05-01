@@ -13,3 +13,6 @@ coverage.out
 
 # Python scratch (local experiments only)
 .venv/
+
+# Local sync state
+/data/

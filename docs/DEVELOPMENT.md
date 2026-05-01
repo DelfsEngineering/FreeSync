@@ -23,10 +23,19 @@ make build
 ./freesync run
 ```
 
+## Run CLI (loads config, prints servers; full OData sync not wired)
+
+```bash
+go run ./cmd/freesync run
+FREESYNC_CONFIG=config/dev.local.json go run ./cmd/freesync run
+```
+
 ## Layout
 
 | Path | Role |
 |------|------|
-| `cmd/freesync` | CLI |
-| `internal/domain` | Pure sync logic (tests first, no FM network) |
-| (later) `internal/odata`, `internal/state` | Adapters |
+| `cmd/freesync` | CLI (`run`) |
+| `internal/config` | JSON config |
+| `internal/domain` | Window, LWW, `BuildPlan` (tests) |
+| `internal/state` | Checkpoint file (`data/sync-state.json`); SQLite per SPEC later |
+| `testdata/` | Invalid config samples for tests |

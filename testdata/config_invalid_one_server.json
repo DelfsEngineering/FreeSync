@@ -1,0 +1,19 @@
+{
+  "servers": [
+    {
+      "id": "only",
+      "url": "https://x/fmi/odata/v4/db",
+      "username": "u",
+      "password": "p"
+    }
+  ],
+  "tables": [],
+  "defaults": {
+    "primaryKey": "id",
+    "modifiedField": "ModificationTimestamp"
+  },
+  "overlapMinutes": 10,
+  "initialLookback": "1d",
+  "maxLookback": "90d",
+  "schemaMode": "intersection"
+}
