@@ -244,6 +244,45 @@ runs once, exits
 - cancel
 - status
 
+## Development workflow & observability (IDE / closed loop)
+
+### Can it run “in this IDE”?
+
+**Yes, for development.** Cursor is a normal editor with a terminal: there is no special “run inside the IDE” runtime beyond what you already use for Go or Docker.
+
+| Approach | What you do | Notes |
+|----------|-------------|--------|
+| **CLI in Integrated Terminal** | Open this repo → Terminal → run the binary or `go run` with config pointing at dev OData URLs | Same machine as FileMaker not required; needs **network reachability** to blue/green dev servers (VPN, LAN, or HTTPS). |
+| **Debugger** | Use the IDE’s **Run and Debug** (e.g. Go `launch.json`) to set breakpoints in orchestration, stepping through manifest → apply → verify | Best for narrowing bugs; not required for day-to-day sync validation. |
+| **Docker** | `docker run` / Compose with **bind-mount** for config + `/data` SQLite | Matches production; rebuild image when code changes unless using live-mount dev image. |
+
+FileMaker Server itself does **not** run inside Cursor; the app only **calls OData over the network**. For fully offline work, use **fakes / stub HTTP** (see TDD section) or recorded fixtures.
+
+### Logs (what to implement so results are visible)
+
+- **Default sink:** **stdout and/or stderr** in the dev container/process so the Integrated Terminal shows output immediately.
+- **Structure:** Prefer **one line per event** (plain text with key=value, or **JSON Lines**) including at minimum: `run_id`, `table`, `phase` (`manifest` \| `compare` \| `hydrate` \| `apply` \| `verify`), `window_start`, `window_end`, `duration_ms`, `level`.
+- **Human summary:** At end of a successful or failed `run`, emit a **short summary block**: tables touched, row counts (manifest rows, hydrated, upserted, deleted), whether **checkpoint advanced**, exit reason on failure.
+- **Levels:** `DEBUG` (optional paging traces), `INFO` (milestones), `WARN`, `ERROR` — controlled by env e.g. `LOG_LEVEL`.
+
+Optional later: `LOG_FILE=/path` for a rotating file on long runs; not required for V1 closed loop if terminal capture is enough.
+
+### Results beyond logs
+
+- **Exit codes (stable contract):** e.g. `0` = success and verified; `1` = verify mismatch or partial apply; `2` = config invalid; `3` = network/OData failure — exact mapping is an implementation detail but should be **documented** so scripts and CI can branch.
+- **SQLite:** Print resolved path to `sync-state.sqlite` on startup (or in summary) so developers can inspect `sync_state` / `sync_runs` with `sqlite3` or a GUI tool.
+- **`sync_runs`:** Each run should log its **row id** (or UUID) so logs and DB rows **correlate**.
+
+### Closed-loop development (you ↔ tooling ↔ assistant)
+
+1. **Run** a sync from the Terminal in this repo (`run` once, verbose `LOG_LEVEL=debug` when needed).
+2. **Observe** structured lines + final summary + exit code.
+3. **Inspect** SQLite if checkpoint or counts look wrong.
+4. **Paste** terminal output (or relevant log slice) into chat for review — works best when logs are **consistent and include run/table/window context**, not only free-form prose.
+5. **Tests** stay the source of truth for regressions; logs are for integration debugging and operational proof.
+
+This keeps development **tight**: no separate dashboard required for V1; the IDE terminal + optional DB peek + tests form the loop.
+
 ## Failure Handling
 
 - retry window on failure
