@@ -1,8 +1,8 @@
-# fm-odata-sync — Specification
+# Free Sync — Specification
 
 ## System Name
 
-**fm-odata-sync**
+**Free Sync** — OData bidirectional sync between two FileMaker servers. Ship artifacts may use names such as `freesync` / `freesync:latest` for CLI or Docker image tags.
 
 ## Purpose
 
@@ -231,7 +231,7 @@ No record data stored.
 ### V1 (recommended)
 
 ```text
-docker run fm-odata-sync run
+docker run freesync run
 ```
 
 runs once, exits
@@ -271,6 +271,58 @@ runs once, exits
 - minimal data transfer
 - deterministic sync behavior
 
+## Building with TDD (Test-Driven Development)
+
+TDD fits this design if you **separate pure logic from I/O** and test **in order of dependency**: domain → orchestration → adapters → thin e2e.
+
+### 1. Pure domain (fast, table-driven — write these first)
+
+No network, no SQLite. Input in, struct out.
+
+- **Window math:** `windowStart` / `windowEnd` from `safeThroughTimestamp`, `overlap`, `now` (edge cases: missing checkpoint, overlap larger than lookback, clock at boundary).
+- **Manifest compare:** Given two side-manifests (id + `ModificationTimestamp`) and delete-journal events in the same window, produce the **plan**: which ids to create, update, delete on each target, and **why** (LWW: compare timestamps; delete vs edit with `deletedAt`).
+- **Verify predicate:** Given pre-apply and post-apply manifest snapshots, whether “match” is satisfied (define equality rules once here).
+- **Adaptive windowing:** Given row count from a trial manifest pass, how the **next** window size changes given `targetRowsPerWindow` and min/max bounds.
+
+**TDD loop:** one behavior per test, start with the smallest example (single id, then two sides, then delete journal entry).
+
+### 2. In-memory fakes (still no real FM)
+
+- **OData client interface** in your app: `ListManifestPage`, `GetRecord`, `Upsert`, `Delete` (or batch variants).  
+- **Fake** returns scripted rows; tests assert the **sequence of calls** and arguments (paging, `$filter` bounds) for a given plan.
+
+**TDD loop:** implement the **orchestrator** (steps 1–8) against the interface; fakes prove you **request the right diffs** and **apply in the right order** (per table order if you add dependency rules later).
+
+### 3. SQLite state (file or in-memory)
+
+- Migrations or schema create; **repository** that loads/saves `safeThroughTimestamp` and `sync_runs`.  
+- Tests use **temp file** or `sqlite` in-memory; assert **checkpoint only advances** after a successful verify (property: “no advance on failed verify”).
+
+### 4. Contract / integration tests (real HTTP, not necessarily FileMaker)
+
+- **OData** contract tests against a **recorded stub** (e.g. `httptest` in Go) or a **local mock server** that returns fixed OData JSON for specific URLs.  
+- Optional: run against a **real dev FileMaker** server in CI only (gated) to catch filter/pagination quirks.
+
+### 5. End-to-end (few, slow)
+
+- One **happy path:** two fakes or one FM test double, full `run` once, checkpoint moves.  
+- One **verify failure** path: second manifest pass returns a mismatch → checkpoint **unchanged**.
+
+### What to avoid in TDD for this project
+
+- **E2E-only** tests (flaky, slow, hard to get LWW edge cases).  
+- **Testing full FileMaker** in every unit test.  
+- **Asserting on log text** as the main contract (use structured results / return values).
+
+### Suggested test layers (summary)
+
+| Layer        | What you prove |
+|-------------|----------------|
+| Domain      | LWW, deletes, window math, verify match — **deterministic** |
+| Orchestrator| Step order, no hydrate without diff, no checkpoint without verify |
+| Adapters    | Correct OData URLs, auth header, pagination loop |
+| E2E         | One container run, real volume + SQLite file (optional) |
+
 ---
 
-*If you hand this to a Go dev, they can build it cleanly.*
+*If you hand this to a Go dev, they can build it cleanly with the above test shape.*
