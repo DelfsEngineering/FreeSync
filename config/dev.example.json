@@ -29,6 +29,7 @@
   "overlapMinutes": 10,
   "initialLookback": "1d",
   "maxLookback": "90d",
+  "bootstrapMode": "fixed",
   "schemaMode": "intersection",
   "batchSize": 50,
   "maxWorkers": 8,

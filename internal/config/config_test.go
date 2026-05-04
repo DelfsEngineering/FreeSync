@@ -65,3 +65,18 @@ func TestVerifyMode_defaultAndOff(t *testing.T) {
 		t.Fatal("unknown verify mode should fall back to off")
 	}
 }
+
+func TestBootstrapMode_defaultAndBinary(t *testing.T) {
+	c := &Config{}
+	if c.BootstrapBinary() {
+		t.Fatal("default bootstrap mode should be fixed")
+	}
+	c.BootstrapMode = "binary"
+	if !c.BootstrapBinary() {
+		t.Fatal("bootstrapMode=binary should enable binary bootstrap")
+	}
+	c.BootstrapMode = "bogus"
+	if c.BootstrapBinary() {
+		t.Fatal("unknown bootstrap mode should fall back to fixed")
+	}
+}

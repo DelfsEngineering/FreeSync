@@ -58,6 +58,16 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 	if lookback <= 0 {
 		lookback = 24 * time.Hour
 	}
+	maxLookback := 90 * 24 * time.Hour
+	if strings.TrimSpace(cfg.MaxLookback) != "" {
+		maxLookback, err = timespec.Parse(cfg.MaxLookback)
+		if err != nil {
+			return fmt.Errorf("maxLookback: %w", err)
+		}
+		if maxLookback <= 0 {
+			maxLookback = 90 * 24 * time.Hour
+		}
+	}
 
 	now := time.Now().UTC()
 	schemaMode := strings.ToLower(strings.TrimSpace(cfg.SchemaMode))
@@ -80,10 +90,38 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 			return err
 		}
 		if !ok {
-			window = domain.SyncWindow{
-				Start: now.Add(-lookback),
-				End:   now,
+			start := now.Add(-lookback)
+			if cfg.BootstrapBinary() {
+				logf("table %s: bootstrapMode=binary (lookback=%s maxLookback=%s)", tbl.Name, lookback, maxLookback)
+				probe := func(ts time.Time) (bool, error) {
+					ctxProbe, cancel := context.WithTimeout(ctx, 45*time.Second)
+					defer cancel()
+					blueHead, err := odata.FetchManifestHead(ctxProbe, blueClient, tbl.Name, ts, now, pk, mod, 5)
+					if err != nil {
+						return false, fmt.Errorf("blue probe: %w", err)
+					}
+					greenHead, err := odata.FetchManifestHead(ctxProbe, greenClient, tbl.Name, ts, now, pk, mod, 5)
+					if err != nil {
+						return false, fmt.Errorf("green probe: %w", err)
+					}
+					if len(blueHead) != len(greenHead) {
+						return true, nil
+					}
+					for i := range blueHead {
+						if blueHead[i].ID != greenHead[i].ID || !blueHead[i].Mod.Equal(greenHead[i].Mod) {
+							return true, nil
+						}
+					}
+					return false, nil
+				}
+				s, err := findDivergenceBoundaryBinary(now, maxLookback, probe, logf)
+				if err != nil {
+					logf("table %s: binary bootstrap probe failed (%v); fallback to fixed lookback=%s", tbl.Name, err, lookback)
+				} else {
+					start = s
+				}
 			}
+			window = domain.SyncWindow{Start: start, End: now}
 			logf("table %s: bootstrap window [%s .. %s]", tbl.Name, window.Start.Format(time.RFC3339), window.End.Format(time.RFC3339))
 		} else {
 			window = domain.ComputeSyncWindow(safe, overlap, now)

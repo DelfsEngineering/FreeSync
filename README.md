@@ -89,6 +89,7 @@ curl -X POST http://localhost:8080/run \
 - **`config/dev.local.json`** — real hosts/creds (gitignored). Copy from the example and edit.
 
 - Performance knobs: `batchSize` (default `50`), `maxWorkers` (default `8`), `verifyMode` (`off` default, `strict` for full post-apply verification).
+- Bootstrap behavior: `bootstrapMode` (`fixed` default, `binary` for successive approximation of divergence boundary on first run).
 
 Environment (optional):
 
@@ -105,6 +106,7 @@ Flags **`-config`** and **`-state`** set the same paths.
 
 - Tables are listed under **`tables`** in config; each needs **`name`**, **`primaryKey`**, **`modifiedField`** (or use **`defaults`**).
 - **Schema:** intersection of fields on both files. **`$metadata`** is used to skip **calculated** / **summary** / OData **Computed** properties when those annotations are present. Use per-table **`fieldOverrides`** to include a field that would otherwise be skipped.
+- On first run without checkpoint: `bootstrapMode=binary` uses lightweight head probes and binary search to find a narrow bootstrap window; if probe fails, it falls back to fixed `initialLookback`.
 
 ## Tests
 

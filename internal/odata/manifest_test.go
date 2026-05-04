@@ -160,3 +160,32 @@ func TestManifestPageURL_includesQuotedSelect(t *testing.T) {
 		t.Fatalf("expected quoted select in url, got %s", u)
 	}
 }
+
+func TestFetchManifestHead_returnsOrderedRows(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.RawQuery, "$top=3") {
+			t.Fatalf("expected top=3, got query %q", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"value": []map[string]any{
+				{"id": "a", "ModificationTimestamp": "2026-01-01T00:00:00Z"},
+				{"id": "b", "ModificationTimestamp": "2026-01-01T00:05:00Z"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cli := &Client{BaseURL: srv.URL + "/db", Username: "u", Password: "p"}
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows, err := FetchManifestHead(context.Background(), cli, "People", start, end, "id", "ModificationTimestamp", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows: got %d", len(rows))
+	}
+	if rows[0].ID != "a" || rows[1].ID != "b" {
+		t.Fatalf("unexpected row order: %+v", rows)
+	}
+}

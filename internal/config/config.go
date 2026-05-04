@@ -15,6 +15,7 @@ type Config struct {
 	OverlapMinutes  int         `json:"overlapMinutes"`
 	InitialLookback string      `json:"initialLookback"`
 	MaxLookback     string      `json:"maxLookback"`
+	BootstrapMode   string      `json:"bootstrapMode"`
 	SchemaMode      string      `json:"schemaMode"`
 	BatchSize       int         `json:"batchSize"`
 	MaxWorkers      int         `json:"maxWorkers"`
@@ -126,6 +127,19 @@ func (c *Config) VerifyStrict() bool {
 		return true
 	default:
 		// Unknown values fall back to default behavior.
+		return false
+	}
+}
+
+// BootstrapBinary reports whether binary bootstrap probing is enabled.
+// Supported: "fixed" (default), "binary".
+func (c *Config) BootstrapBinary() bool {
+	switch c.BootstrapMode {
+	case "", "fixed":
+		return false
+	case "binary":
+		return true
+	default:
 		return false
 	}
 }
