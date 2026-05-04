@@ -23,12 +23,27 @@ func main() {
 	if statePath == "" {
 		statePath = "data/sync-state.json"
 	}
-	apply := flag.Bool("apply", false, "execute writes (PATCH/POST); default is dry-run")
-	flag.StringVar(&configPath, "config", configPath, "path to JSON config")
-	flag.StringVar(&statePath, "state", statePath, "path to checkpoint file (JSON)")
-	flag.Parse()
-	if len(flag.Args()) < 1 || flag.Args()[0] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: freesync [-config path] [-state path] [-apply] run")
+
+	runIdx := -1
+	for i, a := range os.Args[1:] {
+		if a == "run" {
+			runIdx = i + 1 // index into os.Args
+			break
+		}
+	}
+	if runIdx < 0 {
+		fmt.Fprintln(os.Stderr, "usage: freesync run [-config path] [-state path] [-apply]")
+		os.Exit(2)
+	}
+	before := os.Args[1:runIdx]
+	after := os.Args[runIdx+1:]
+	flagArgs := append(append([]string{}, before...), after...)
+
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	apply := fs.Bool("apply", false, "execute writes (PATCH/POST); default is dry-run")
+	fs.StringVar(&configPath, "config", configPath, "path to JSON config")
+	fs.StringVar(&statePath, "state", statePath, "path to checkpoint file (JSON)")
+	if err := fs.Parse(flagArgs); err != nil {
 		os.Exit(2)
 	}
 
@@ -43,6 +58,11 @@ func main() {
 		fmt.Printf("  server %s: %s (user %s)\n", s.ID, s.URL, s.Username)
 	}
 	fmt.Printf("  overlap: %s  tables: %d  schemaMode: %s\n", cfg.Overlap(), len(cfg.Tables), cfg.SchemaMode)
+	verifyMode := "off"
+	if cfg.VerifyStrict() {
+		verifyMode = "strict"
+	}
+	fmt.Printf("  applyTuning: batchSize=%d maxWorkers=%d verifyMode=%s\n", cfg.ApplyBatchSize(), cfg.ApplyWorkers(), verifyMode)
 
 	if _, err := os.Stat(statePath); err == nil {
 		fmt.Printf("  checkpoint file: %s\n", statePath)

@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to config/dev.local.json and fill secrets. dev.local.json is gitignored. OData /fmi/odata/v4/{db} is case-sensitive; use the exact name from GET /fmi/odata/v4 on the host.",
+  "_comment": "Copy to config/dev.local.json and fill secrets. dev.local.json is gitignored. OData /fmi/odata/v4/{db} is case-sensitive; use the exact name from GET /fmi/odata/v4 on the host. Per table, fieldOverrides lists extra fields to sync (e.g. calculated); otherwise only non-calculated fields from $metadata are synced.",
   "servers": [
     {
       "id": "blue",
@@ -18,7 +18,8 @@
     {
       "name": "People",
       "primaryKey": "id",
-      "modifiedField": "ModificationTimestamp"
+      "modifiedField": "ModificationTimestamp",
+      "fieldOverrides": []
     }
   ],
   "defaults": {
@@ -28,5 +29,8 @@
   "overlapMinutes": 10,
   "initialLookback": "1d",
   "maxLookback": "90d",
-  "schemaMode": "intersection"
+  "schemaMode": "intersection",
+  "batchSize": 50,
+  "maxWorkers": 8,
+  "verifyMode": "off"
 }

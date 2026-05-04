@@ -9,14 +9,25 @@ import (
 	"time"
 )
 
+const manifestPageSize = 50
+
 // FetchManifest returns id -> ModificationTimestamp for rows in [start, end] inclusive window.
 func FetchManifest(ctx context.Context, cli *Client, entitySet string, start, end time.Time, pkField, modField string) (map[string]time.Time, error) {
+	return FetchManifestWithProgress(ctx, cli, entitySet, start, end, pkField, modField, nil)
+}
+
+// FetchManifestWithProgress is FetchManifest with optional per-page callback.
+func FetchManifestWithProgress(ctx context.Context, cli *Client, entitySet string, start, end time.Time, pkField, modField string, onPage func(pageNum, pageRows, totalRows int)) (map[string]time.Time, error) {
 	out := make(map[string]time.Time)
-	pageURL, err := manifestPageURL(cli.BaseURL, entitySet, start, end, modField, "")
-	if err != nil {
-		return nil, err
-	}
-	for pageURL != "" {
+	pageURL := ""
+	skip := 0
+	pageNum := 0
+	for {
+		var err error
+		pageURL, err = manifestPageURL(cli.BaseURL, entitySet, start, end, pkField, modField, pageURL, manifestPageSize, skip)
+		if err != nil {
+			return nil, err
+		}
 		b, code, err := cli.GetJSON(ctx, pageURL)
 		if err != nil {
 			return nil, err
@@ -50,13 +61,26 @@ func FetchManifest(ctx context.Context, cli *Client, entitySet string, start, en
 			}
 			out[id] = mod
 		}
-		pageURL = envelope.NextLink
+		pageNum++
+		if onPage != nil {
+			onPage(pageNum, len(envelope.Value), len(out))
+		}
+		if envelope.NextLink != "" {
+			pageURL = envelope.NextLink
+			continue
+		}
+		// FileMaker may omit @odata.nextLink for plain $top/$skip usage; page manually.
+		if len(envelope.Value) < manifestPageSize {
+			break
+		}
+		pageURL = ""
+		skip += manifestPageSize
 		SleepThrottle(50 * time.Millisecond)
 	}
 	return out, nil
 }
 
-func manifestPageURL(base, entitySet string, start, end time.Time, modField string, pageToken string) (string, error) {
+func manifestPageURL(base, entitySet string, start, end time.Time, pkField, modField string, pageToken string, top, skip int) (string, error) {
 	if pageToken != "" {
 		return pageToken, nil
 	}
@@ -68,17 +92,26 @@ func manifestPageURL(base, entitySet string, start, end time.Time, modField stri
 		end.UTC().Format(time.RFC3339),
 	)
 	// FileMaker OData rejects $select lists (comma) and multi-field $orderby (comma).
-	// Omit $select — read pk/mod from full rows (slightly larger payloads).
+	// On some FileMaker servers, comma-separated $select only works when each field
+	// name is wrapped in double quotes.
 	ord := modField + " asc"
 	q := "$filter=" + encodeSpaces(filter) +
 		"&$orderby=" + encodeSpaces(ord) +
-		"&$top=500"
+		"&$select=" + quoteSelectField(pkField) + "," + quoteSelectField(modField) +
+		fmt.Sprintf("&$top=%d", top)
+	if skip > 0 {
+		q += fmt.Sprintf("&$skip=%d", skip)
+	}
 	return JoinPath(base, url.PathEscape(entitySet)) + "?" + q, nil
 }
 
 // encodeSpaces only — FileMaker rejects comma-encoding in $select/$orderby (see live tests).
 func encodeSpaces(s string) string {
 	return strings.ReplaceAll(s, " ", "%20")
+}
+
+func quoteSelectField(field string) string {
+	return "%22" + encodeSpaces(field) + "%22"
 }
 
 func parseODataTime(v any) (time.Time, error) {

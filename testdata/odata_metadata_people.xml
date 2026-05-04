@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx" Version="4.0">
+  <edmx:DataServices>
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="TestNS">
+      <EntityType Name="People">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String"/>
+        <Property Name="ModificationTimestamp" Type="Edm.DateTimeOffset"/>
+        <Property Name="notes" Type="Edm.String"/>
+        <Property Name="totalCalc" Type="Edm.Decimal">
+          <Annotation Term="Org.OData.Core.V1.Computed" Bool="true"/>
+        </Property>
+        <Property Name="fmCalc" Type="Edm.String">
+          <Annotation Term="https://com.filemaker.example/field.Calculation" Bool="true"/>
+        </Property>
+      </EntityType>
+      <EntityContainer Name="TestService">
+        <EntitySet Name="People" EntityType="TestNS.People"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

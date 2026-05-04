@@ -14,6 +14,23 @@ import (
 // ErrNotFound is returned when a record GET returns 404.
 var ErrNotFound = errors.New("odata: record not found")
 
+// HTTPStatusError wraps non-2xx OData responses with method/status/body.
+type HTTPStatusError struct {
+	Method     string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s %d: %s", e.Method, e.StatusCode, e.Body)
+}
+
+// IsHTTPStatus reports whether err contains an HTTPStatusError with status code.
+func IsHTTPStatus(err error, status int) bool {
+	var hs *HTTPStatusError
+	return errors.As(err, &hs) && hs.StatusCode == status
+}
+
 // GetRecord loads one row as a JSON object (not wrapped in value array).
 func GetRecord(ctx context.Context, cli *Client, entitySet, id string) (map[string]any, error) {
 	path := JoinPath(cli.BaseURL, RecordPath(entitySet, id))
@@ -64,7 +81,7 @@ func PatchRecord(ctx context.Context, cli *Client, entitySet, id string, fields 
 	defer res.Body.Close()
 	rb, _ := io.ReadAll(res.Body)
 	if res.StatusCode >= 300 {
-		return fmt.Errorf("PATCH %d: %s", res.StatusCode, truncate(string(rb), 400))
+		return &HTTPStatusError{Method: "PATCH", StatusCode: res.StatusCode, Body: truncate(string(rb), 400)}
 	}
 	return nil
 }
@@ -90,7 +107,7 @@ func PostRecord(ctx context.Context, cli *Client, entitySet string, fields map[s
 	defer res.Body.Close()
 	rb, _ := io.ReadAll(res.Body)
 	if res.StatusCode >= 300 {
-		return fmt.Errorf("POST %d: %s", res.StatusCode, truncate(string(rb), 400))
+		return &HTTPStatusError{Method: "POST", StatusCode: res.StatusCode, Body: truncate(string(rb), 400)}
 	}
 	return nil
 }

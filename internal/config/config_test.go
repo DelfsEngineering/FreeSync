@@ -28,3 +28,40 @@ func TestValidate_twoServers(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestDefaults_batchWorkers(t *testing.T) {
+	c := &Config{}
+	if got := c.ApplyBatchSize(); got != 50 {
+		t.Fatalf("batch size default: got %d want 50", got)
+	}
+	if got := c.ApplyWorkers(); got != 8 {
+		t.Fatalf("workers default: got %d want 8", got)
+	}
+	c.BatchSize = 25
+	c.MaxWorkers = 8
+	if got := c.ApplyBatchSize(); got != 25 {
+		t.Fatalf("batch size configured: got %d want 25", got)
+	}
+	if got := c.ApplyWorkers(); got != 8 {
+		t.Fatalf("workers configured: got %d want 8", got)
+	}
+}
+
+func TestVerifyMode_defaultAndOff(t *testing.T) {
+	c := &Config{}
+	if c.VerifyStrict() {
+		t.Fatal("default verify should be off")
+	}
+	c.VerifyMode = "off"
+	if c.VerifyStrict() {
+		t.Fatal("verifyMode=off should disable strict verify")
+	}
+	c.VerifyMode = "strict"
+	if !c.VerifyStrict() {
+		t.Fatal("verifyMode=strict should enable strict verify")
+	}
+	c.VerifyMode = "bogus"
+	if c.VerifyStrict() {
+		t.Fatal("unknown verify mode should fall back to off")
+	}
+}

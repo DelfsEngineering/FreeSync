@@ -16,6 +16,9 @@ type Config struct {
 	InitialLookback string      `json:"initialLookback"`
 	MaxLookback     string      `json:"maxLookback"`
 	SchemaMode      string      `json:"schemaMode"`
+	BatchSize       int         `json:"batchSize"`
+	MaxWorkers      int         `json:"maxWorkers"`
+	VerifyMode      string      `json:"verifyMode"`
 }
 
 type Server struct {
@@ -26,9 +29,10 @@ type Server struct {
 }
 
 type TableSpec struct {
-	Name          string `json:"name"`
-	PrimaryKey    string `json:"primaryKey"`
-	ModifiedField string `json:"modifiedField"`
+	Name           string   `json:"name"`
+	PrimaryKey     string   `json:"primaryKey"`
+	ModifiedField  string   `json:"modifiedField"`
+	FieldOverrides []string `json:"fieldOverrides"` // optional: extra fields to sync (e.g. calculated) in addition to non-calculated intersection fields
 }
 
 type Defaults struct {
@@ -94,4 +98,34 @@ func (c *Config) PKMod(t TableSpec) (pk, mod string) {
 		mod = c.Defaults.ModifiedField
 	}
 	return pk, mod
+}
+
+// ApplyBatchSize returns apply batch size (defaults to 50).
+func (c *Config) ApplyBatchSize() int {
+	if c.BatchSize <= 0 {
+		return 50
+	}
+	return c.BatchSize
+}
+
+// ApplyWorkers returns number of concurrent apply workers (defaults to 8).
+func (c *Config) ApplyWorkers() int {
+	if c.MaxWorkers <= 0 {
+		return 8
+	}
+	return c.MaxWorkers
+}
+
+// VerifyStrict reports whether strict post-apply verification is enabled.
+// Supported: "off" (default), "strict".
+func (c *Config) VerifyStrict() bool {
+	switch c.VerifyMode {
+	case "", "off":
+		return false
+	case "strict":
+		return true
+	default:
+		// Unknown values fall back to default behavior.
+		return false
+	}
 }
