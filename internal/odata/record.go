@@ -1,12 +1,10 @@
 package odata
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -67,21 +65,12 @@ func PatchRecord(ctx context.Context, cli *Client, entitySet, id string, fields 
 		return err
 	}
 	path := JoinPath(cli.BaseURL, RecordPath(entitySet, id))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, path, bytes.NewReader(body))
+	rb, code, err := cli.doRequest(ctx, http.MethodPatch, path, body, "application/json", "application/json")
 	if err != nil {
 		return err
 	}
-	req.SetBasicAuth(cli.Username, cli.Password)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	res, err := cli.httpClient().Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	rb, _ := io.ReadAll(res.Body)
-	if res.StatusCode >= 300 {
-		return &HTTPStatusError{Method: "PATCH", StatusCode: res.StatusCode, Body: truncate(string(rb), 400)}
+	if code >= 300 {
+		return &HTTPStatusError{Method: "PATCH", StatusCode: code, Body: truncate(string(rb), 400)}
 	}
 	return nil
 }
@@ -93,21 +82,12 @@ func PostRecord(ctx context.Context, cli *Client, entitySet string, fields map[s
 		return err
 	}
 	path := JoinPath(cli.BaseURL, strings.TrimLeft(entitySet, "/"))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader(body))
+	rb, code, err := cli.doRequest(ctx, http.MethodPost, path, body, "application/json", "application/json")
 	if err != nil {
 		return err
 	}
-	req.SetBasicAuth(cli.Username, cli.Password)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	res, err := cli.httpClient().Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	rb, _ := io.ReadAll(res.Body)
-	if res.StatusCode >= 300 {
-		return &HTTPStatusError{Method: "POST", StatusCode: res.StatusCode, Body: truncate(string(rb), 400)}
+	if code >= 300 {
+		return &HTTPStatusError{Method: "POST", StatusCode: code, Body: truncate(string(rb), 400)}
 	}
 	return nil
 }

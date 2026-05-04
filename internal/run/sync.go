@@ -43,8 +43,8 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 		return err
 	}
 	httpClient := &http.Client{Timeout: 2 * time.Minute}
-	blueClient := &odata.Client{BaseURL: odata.TrimBase(blueSrv.URL), Username: blueSrv.Username, Password: blueSrv.Password, HTTPClient: httpClient}
-	greenClient := &odata.Client{BaseURL: odata.TrimBase(greenSrv.URL), Username: greenSrv.Username, Password: greenSrv.Password, HTTPClient: httpClient}
+	blueClient := &odata.Client{BaseURL: odata.TrimBase(blueSrv.URL), Username: blueSrv.Username, Password: blueSrv.Password, HTTPClient: httpClient, Logf: logf}
+	greenClient := &odata.Client{BaseURL: odata.TrimBase(greenSrv.URL), Username: greenSrv.Username, Password: greenSrv.Password, HTTPClient: httpClient, Logf: logf}
 
 	overlap := time.Duration(cfg.OverlapMinutes) * time.Minute
 	if cfg.OverlapMinutes <= 0 {

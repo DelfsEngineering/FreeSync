@@ -6,7 +6,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 )
 
@@ -18,22 +17,7 @@ type PropertySpec struct {
 
 // GetBytes performs GET and returns the raw body and HTTP status (any Accept).
 func (c *Client) GetBytes(ctx context.Context, url string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, 0, err
-	}
-	req.SetBasicAuth(c.Username, c.Password)
-	req.Header.Set("Accept", "application/xml, */*")
-	res, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer res.Body.Close()
-	b, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, res.StatusCode, err
-	}
-	return b, res.StatusCode, nil
+	return c.doRequest(ctx, "GET", url, nil, "application/xml, */*", "")
 }
 
 // EntityPropertyNames returns OData scalar Property names for an entity set (e.g. "People")

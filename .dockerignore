@@ -1,0 +1,9 @@
+.git
+.gitignore
+.cursor
+data
+config/dev.local.json
+tmp
+*.log
+*.out
+bin
