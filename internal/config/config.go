@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Config matches the committed example shape; unknown JSON keys are ignored.
 type Config struct {
-	Servers         []Server    `json:"servers"`
-	Tables          []TableSpec `json:"tables"`
+	Files           []FileConfig `json:"files"`
 	Defaults        Defaults    `json:"defaults"`
 	OverlapMinutes  int         `json:"overlapMinutes"`
 	InitialLookback string      `json:"initialLookback"`
@@ -20,6 +20,13 @@ type Config struct {
 	BatchSize       int         `json:"batchSize"`
 	MaxWorkers      int         `json:"maxWorkers"`
 	VerifyMode      string      `json:"verifyMode"`
+}
+
+type FileConfig struct {
+	ID       string      `json:"id"`
+	Servers  []Server    `json:"servers"`
+	Tables   []TableSpec `json:"tables"`
+	Defaults Defaults    `json:"defaults"`
 }
 
 type Server struct {
@@ -60,23 +67,22 @@ func LoadFile(path string) (*Config, error) {
 
 // Validate checks minimal requirements for a runnable sync.
 func (c *Config) Validate() error {
-	if len(c.Servers) != 2 {
-		return fmt.Errorf("need exactly 2 servers, got %d", len(c.Servers))
+	if len(c.Files) == 0 {
+		return fmt.Errorf("need at least 1 file config")
 	}
-	for i, s := range c.Servers {
-		if s.ID == "" || s.URL == "" || s.Username == "" {
-			return fmt.Errorf("servers[%d]: id, url, username required", i)
+	seen := make(map[string]bool, len(c.Files))
+	for i := range c.Files {
+		f := &c.Files[i]
+		if strings.TrimSpace(f.ID) == "" {
+			return fmt.Errorf("files[%d]: id required", i)
 		}
-	}
-	if c.Servers[0].ID == c.Servers[1].ID {
-		return fmt.Errorf("servers must have distinct ids")
-	}
-	seen := make(map[string]bool)
-	for _, s := range c.Servers {
-		seen[s.ID] = true
-	}
-	if !seen["blue"] || !seen["green"] {
-		return fmt.Errorf("servers must include id \"blue\" and \"green\"")
+		if seen[f.ID] {
+			return fmt.Errorf("files[%d]: duplicate id %q", i, f.ID)
+		}
+		seen[f.ID] = true
+		if err := f.Validate(); err != nil {
+			return fmt.Errorf("files[%d] (%s): %w", i, f.ID, err)
+		}
 	}
 	return nil
 }
@@ -90,16 +96,43 @@ func (c *Config) Overlap() string {
 }
 
 // PKMod returns primary key and modification field names for a table (defaults apply).
-func (c *Config) PKMod(t TableSpec) (pk, mod string) {
+func (d Defaults) Merge(override Defaults) Defaults {
+	out := d
+	if override.PrimaryKey != "" {
+		out.PrimaryKey = override.PrimaryKey
+	}
+	if override.ModifiedField != "" {
+		out.ModifiedField = override.ModifiedField
+	}
+	return out
+}
+
+// DefaultsForFile returns the effective defaults for a specific file group.
+func (c *Config) DefaultsForFile(f FileConfig) Defaults {
+	return c.Defaults.Merge(f.Defaults)
+}
+
+// PKMod returns primary key and modification field names for a table (defaults apply).
+func (c *Config) PKMod(f FileConfig, t TableSpec) (pk, mod string) {
+	def := c.DefaultsForFile(f)
 	pk = t.PrimaryKey
 	if pk == "" {
-		pk = c.Defaults.PrimaryKey
+		pk = def.PrimaryKey
 	}
 	mod = t.ModifiedField
 	if mod == "" {
-		mod = c.Defaults.ModifiedField
+		mod = def.ModifiedField
 	}
 	return pk, mod
+}
+
+// TotalTableCount reports the number of configured table entries across all files.
+func (c *Config) TotalTableCount() int {
+	total := 0
+	for _, f := range c.Files {
+		total += len(f.Tables)
+	}
+	return total
 }
 
 // ApplyBatchSize returns apply batch size (defaults to 50).

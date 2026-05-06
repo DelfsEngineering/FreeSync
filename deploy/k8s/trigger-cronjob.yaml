@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: freesync-trigger
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: trigger
+              image: curlimages/curl:8.8.0
+              args:
+                - /bin/sh
+                - -ec
+                - |
+                  curl --fail --show-error --silent \
+                    -X POST "http://freesync:8080/run" \
+                    -H "Authorization: Bearer ${FREESYNC_TRIGGER_TOKEN}"
+              env:
+                - name: FREESYNC_TRIGGER_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: freesync-secret
+                      key: triggerToken

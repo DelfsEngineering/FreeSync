@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -157,13 +158,16 @@ func TestOnce_NoPlan_SkipsMetadataAndVerify(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &config.Config{
-		Servers: []config.Server{
-			{ID: "blue", URL: srv.URL + "/blue", Username: "u", Password: "p"},
-			{ID: "green", URL: srv.URL + "/green", Username: "u", Password: "p"},
-		},
-		Tables: []config.TableSpec{
-			{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"},
-		},
+		Files: []config.FileConfig{{
+			ID: "test_file",
+			Servers: []config.Server{
+				{ID: "blue", URL: srv.URL + "/blue", Username: "u", Password: "p"},
+				{ID: "green", URL: srv.URL + "/green", Username: "u", Password: "p"},
+			},
+			Tables: []config.TableSpec{
+				{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"},
+			},
+		}},
 		InitialLookback: "1d",
 		OverlapMinutes:  10,
 		SchemaMode:      "intersection",
@@ -189,11 +193,14 @@ func TestOnce_DefaultLogsSuppressManifestPages(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &config.Config{
-		Servers: []config.Server{
-			{ID: "blue", URL: srv.URL + "/blue", Username: "u", Password: "p"},
-			{ID: "green", URL: srv.URL + "/green", Username: "u", Password: "p"},
-		},
-		Tables:          []config.TableSpec{{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"}},
+		Files: []config.FileConfig{{
+			ID: "test_file",
+			Servers: []config.Server{
+				{ID: "blue", URL: srv.URL + "/blue", Username: "u", Password: "p"},
+				{ID: "green", URL: srv.URL + "/green", Username: "u", Password: "p"},
+			},
+			Tables: []config.TableSpec{{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"}},
+		}},
 		InitialLookback: "1d",
 		OverlapMinutes:  10,
 		SchemaMode:      "intersection",
@@ -227,11 +234,14 @@ func TestOnce_VerboseLogsManifestPages(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &config.Config{
-		Servers: []config.Server{
-			{ID: "blue", URL: srv.URL + "/blue", Username: "u", Password: "p"},
-			{ID: "green", URL: srv.URL + "/green", Username: "u", Password: "p"},
-		},
-		Tables:          []config.TableSpec{{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"}},
+		Files: []config.FileConfig{{
+			ID: "test_file",
+			Servers: []config.Server{
+				{ID: "blue", URL: srv.URL + "/blue", Username: "u", Password: "p"},
+				{ID: "green", URL: srv.URL + "/green", Username: "u", Password: "p"},
+			},
+			Tables: []config.TableSpec{{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"}},
+		}},
 		InitialLookback: "1d",
 		OverlapMinutes:  10,
 		SchemaMode:      "intersection",
@@ -774,5 +784,94 @@ func TestApplyPlan_KeyMismatch_UsesSelectedPKLookups(t *testing.T) {
 	}
 	if atomic.LoadInt32(&patchedResolvedPath) != 1 {
 		t.Fatalf("expected resolved path patch, got %d", patchedResolvedPath)
+	}
+}
+
+func TestAppendDeferredIssues_IncludesFileID(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	issues := []deferredIssue{{RecordID: "r1", Kind: "CopyToBlue", Reason: "record_lock"}}
+
+	if err := appendDeferredIssues(statePath, "betterforms_prod", "Forms", issues); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(statePath + ".deferred.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(b), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["fileId"] != "betterforms_prod" {
+		t.Fatalf("expected fileId in deferred log, got %+v", row)
+	}
+	if row["table"] != "Forms" {
+		t.Fatalf("expected table in deferred log, got %+v", row)
+	}
+}
+
+func TestOnce_BestEffortContinuesAfterFileFailure(t *testing.T) {
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "$filter=") {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"code":"500","message":"bad file"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer badSrv.Close()
+
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "$filter=") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer goodSrv.Close()
+
+	cfg := &config.Config{
+		Files: []config.FileConfig{
+			{
+				ID: "bad_file",
+				Servers: []config.Server{
+					{ID: "blue", URL: badSrv.URL + "/blue", Username: "u", Password: "p"},
+					{ID: "green", URL: badSrv.URL + "/green", Username: "u", Password: "p"},
+				},
+				Tables: []config.TableSpec{{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"}},
+			},
+			{
+				ID: "good_file",
+				Servers: []config.Server{
+					{ID: "blue", URL: goodSrv.URL + "/blue", Username: "u", Password: "p"},
+					{ID: "green", URL: goodSrv.URL + "/green", Username: "u", Password: "p"},
+				},
+				Tables: []config.TableSpec{{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"}},
+			},
+		},
+		InitialLookback: "1d",
+		OverlapMinutes:  10,
+		SchemaMode:      "intersection",
+	}
+
+	var buf bytes.Buffer
+	err := Once(context.Background(), cfg, Options{
+		Apply:     false,
+		StatePath: filepath.Join(t.TempDir(), "state.json"),
+		Logger:    log.New(&buf, "", 0),
+	})
+	if err == nil || !strings.Contains(err.Error(), "bad_file") {
+		t.Fatalf("expected combined file failure, got %v", err)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "file good_file: table People: scanned blue=0 green=0 ops=0") {
+		t.Fatalf("expected good file to continue after failure, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "summary: filesProcessed=2 filesSucceeded=1 filesFailed=1") {
+		t.Fatalf("expected overall file summary, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "summary: failedFiles=bad_file") {
+		t.Fatalf("expected failed file list, got:\n%s", logs)
 	}
 }

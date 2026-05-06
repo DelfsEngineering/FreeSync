@@ -145,6 +145,35 @@ func TestEntityPropertiesPreferThinSchema_fallsBackToMetadata(t *testing.T) {
 	}
 }
 
+func TestBaseTableNames_UsesFileMakerBaseTables(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/FileMaker_BaseTables") {
+			http.NotFound(w, r)
+			return
+		}
+		if !strings.Contains(r.URL.RawQuery, "$select=%22BaseTableName%22,%22BaseTableId%22,%22Source%22,%22ModCount%22") {
+			t.Fatalf("expected BaseTable select fields, got %q", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"value": []map[string]any{
+				{"BaseTableName": "Inbox", "BaseTableId": 1, "Source": "", "ModCount": 1},
+				{"BaseTableName": "Users", "BaseTableId": 2, "Source": "", "ModCount": 1},
+				{"BaseTableName": "Inbox", "BaseTableId": 1, "Source": "", "ModCount": 2},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cli := &Client{BaseURL: srv.URL + "/BF_Test", Username: "u", Password: "p"}
+	got, err := BaseTableNames(context.Background(), cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "Inbox" || got[1] != "Users" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestParseEntityProperties_computedAnnotation(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "odata_metadata_people.xml"))
 	if err != nil {

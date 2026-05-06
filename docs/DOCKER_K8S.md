@@ -94,6 +94,6 @@ curl -X POST "http://freesync.default.svc.cluster.local:8080/run?verbose=true" \
 ## Notes
 
 - Keep deployment replica count at `1` unless you externalize/lock state.
-- Persist `FREESYNC_STATE` on a PVC so checkpoints survive restarts.
+- Persist `FREESYNC_STATE` on a PVC so checkpoints survive restarts. One state file can track multiple configured file groups.
 - Use network policy / ingress auth in addition to bearer token.
 - Keep `FREESYNC_VERBOSE=false` for normal operations. Default logs show concise table summaries and record IDs being synced; use `verbose=true` only when debugging.

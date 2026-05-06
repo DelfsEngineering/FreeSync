@@ -1,8 +1,8 @@
 # Free Sync
 
-Goal: keep **two FileMaker files** (“blue” / “green”) **mirrored**—same logical data on both sides—so either copy can act as **hot standby** or **failover** when traffic fails over between them.
+Goal: keep **blue/green pairs of FileMaker files** mirrored so either copy can act as **hot standby** or **failover** when traffic flips between them.
 
-Bidirectional **OData** sync runs in one process. Changes are driven by `ModificationTimestamp` and a small JSON checkpoint—not full-table pulls.
+Bidirectional **OData** sync runs in one process. One config can now define **multiple FileMaker catalogs** under `files[]`; each file group has its own blue/green endpoints and optional explicit table list. If you omit `files[].tables`, Free Sync auto-discovers only base tables from FileMaker system metadata and skips redundant table occurrences by default. Changes are driven by `ModificationTimestamp` and a small JSON checkpoint, not full-table pulls.
 
 ## Features
 
@@ -30,9 +30,10 @@ cp config/dev.example.json config/dev.local.json
 
 Fill in:
 
-- blue + green OData URLs
+- one `files[]` entry per FileMaker catalog you want synced
+- blue + green OData URLs for each file
 - usernames/passwords
-- table list and PK/modified field names
+- either an explicit table list for each file, or omit `tables` to auto-discover only base tables
 
 2) Build:
 
@@ -100,7 +101,7 @@ curl -X POST http://localhost:8080/run \
 
 ## Configuration
 
-- **`config/dev.example.json`** — template in repo; URLs are placeholders.
+- **`config/dev.example.json`** — multi-file template in repo; URLs are placeholders.
 - **`config/dev.local.json`** — real hosts/creds (gitignored). Copy from the example and edit.
 
 - Performance knobs: `batchSize` (default `50`), `maxWorkers` (default `8`), `verifyMode` (`off` default, `strict` for full post-apply verification).
@@ -121,10 +122,30 @@ Flags **`-config`** and **`-state`** set the same paths.
 
 ## Sync Rules
 
-- Tables are listed under **`tables`** in config; each needs **`name`**, **`primaryKey`**, **`modifiedField`** (or use **`defaults`**).
+- FileMaker catalogs are listed under **`files`**. Each file needs an **`id`** and exactly two **`servers`** (`blue` and `green`).
+- **`files[].tables`** is optional. When omitted, Free Sync queries **`FileMaker_BaseTables`** on both sides, takes the intersection of base table names, and syncs only those tables by default.
+- If **`files[].tables`** is provided, that explicit list takes precedence. Each listed table can set **`name`**, **`primaryKey`**, **`modifiedField`** (or use top-level **`defaults`** plus optional per-file **`defaults`** overrides).
 - **Schema:** intersection of fields on both files. Free Sync prefers the thin FileMaker `FileMaker_Fields` system table to skip calculated/summary fields; full **`$metadata`** remains a fallback. Use per-table **`fieldOverrides`** to include a field that would otherwise be skipped.
 - Use per-table **`ignoreFields`** for FileMaker-local generated fields (for example auto-enter URLs or cache/version fields). Ignored fields are excluded from PATCH bodies and strict verification, even if OData reports them as normal writable fields.
 - On first run without checkpoint: `bootstrapMode=binary` uses lightweight head probes and binary search to find a narrow bootstrap window; if probe fails, it falls back to fixed `initialLookback`.
+
+Example file block:
+
+```json
+{
+  "id": "betterforms_prod",
+  "servers": [
+    { "id": "blue", "url": "https://deng6.example/fmi/odata/v4/BetterForms_Prod", "username": "u", "password": "p" },
+    { "id": "green", "url": "https://deng7.example/fmi/odata/v4/BetterForms_Prod", "username": "u", "password": "p" }
+  ],
+  "tables": [
+    {
+      "name": "Forms",
+      "ignoreFields": ["ModifiedBy", "thumbURL"]
+    }
+  ]
+}
+```
 
 Example table entry:
 
@@ -153,6 +174,7 @@ Notes:
 
 - `make test-container` expects Docker daemon access (Docker Desktop or Colima).
 - It mounts `config/dev.local.json` and `data/` from your local repo.
+- A single state file stores per-file checkpoints as `files.<fileId>.tables.<tableName>`.
 
 ## Docker
 

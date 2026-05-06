@@ -28,6 +28,14 @@ type FileMakerFieldSpec struct {
 	ModCount   int    `json:"ModCount"`
 }
 
+// FileMakerBaseTableSpec is one row from FileMaker_BaseTables.
+type FileMakerBaseTableSpec struct {
+	BaseTableName string `json:"BaseTableName"`
+	BaseTableID   int    `json:"BaseTableId"`
+	Source        string `json:"Source"`
+	ModCount      int    `json:"ModCount"`
+}
+
 // GetBytes performs GET and returns the raw body and HTTP status (any Accept).
 func (c *Client) GetBytes(ctx context.Context, url string) ([]byte, int, error) {
 	return c.doRequest(ctx, "GET", url, nil, "application/xml, */*", "")
@@ -129,6 +137,45 @@ func FileMakerFields(ctx context.Context, cli *Client, tableName string) ([]File
 		return nil, err
 	}
 	return envelope.Value, nil
+}
+
+// BaseTableNames fetches source/base table names from FileMaker_BaseTables.
+func BaseTableNames(ctx context.Context, cli *Client) ([]string, error) {
+	selects := []string{"BaseTableName", "BaseTableId", "Source", "ModCount"}
+	q := "$select=" + strings.Join(quoteSelectFields(selects), ",") +
+		"&$orderby=" + quoteSelectField("BaseTableName") +
+		"&$top=1000"
+	path := JoinPath(cli.BaseURL, "FileMaker_BaseTables") + "?" + q
+	b, code, err := cli.GetJSON(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if code == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if code >= 300 {
+		return nil, fmt.Errorf("FileMaker_BaseTables GET %d: %s", code, truncate(string(b), 300))
+	}
+	var envelope struct {
+		Value []FileMakerBaseTableSpec `json:"value"`
+	}
+	if err := json.Unmarshal(b, &envelope); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(envelope.Value))
+	out := make([]string, 0, len(envelope.Value))
+	for _, row := range envelope.Value {
+		name := strings.TrimSpace(row.BaseTableName)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out, nil
 }
 
 func quoteSelectFields(fields []string) []string {

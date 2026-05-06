@@ -1,34 +1,102 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
 
-func TestLoadFile_example(t *testing.T) {
-	path := filepath.Join("..", "..", "config", "dev.example.json")
+func writeConfigFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadFile_multiFileExample(t *testing.T) {
+	path := writeConfigFile(t, `{
+  "defaults": { "primaryKey": "id", "modifiedField": "ModificationTimestamp" },
+  "files": [
+    {
+      "id": "betterforms_prod",
+      "servers": [
+        { "id": "blue", "url": "https://blue.example/db", "username": "u", "password": "p" },
+        { "id": "green", "url": "https://green.example/db", "username": "u", "password": "p" }
+      ],
+      "tables": [
+        { "name": "People", "ignoreFields": ["thumbURL"] }
+      ]
+    }
+  ]
+}`)
 	c, err := LoadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Servers) != 2 {
-		t.Fatal("servers")
+	if len(c.Files) != 1 {
+		t.Fatalf("files: got %d want 1", len(c.Files))
 	}
-	if c.Servers[0].ID != "blue" || c.Servers[1].ID != "green" {
+	if c.Files[0].ID != "betterforms_prod" {
+		t.Fatalf("file id: got %q", c.Files[0].ID)
+	}
+	if len(c.Files[0].Servers) != 2 || c.Files[0].Servers[0].ID != "blue" || c.Files[0].Servers[1].ID != "green" {
 		t.Fatal("server ids")
 	}
 	if c.Defaults.PrimaryKey != "id" {
 		t.Fatal("defaults")
 	}
-	if len(c.Tables) == 0 || len(c.Tables[0].IgnoreFields) != 1 || c.Tables[0].IgnoreFields[0] != "thumbURL" {
-		t.Fatalf("ignoreFields not loaded from example: %+v", c.Tables)
+	if len(c.Files[0].Tables) == 0 || len(c.Files[0].Tables[0].IgnoreFields) != 1 || c.Files[0].Tables[0].IgnoreFields[0] != "thumbURL" {
+		t.Fatalf("ignoreFields not loaded from example: %+v", c.Files[0].Tables)
 	}
 }
 
-func TestValidate_twoServers(t *testing.T) {
-	_, err := LoadFile(filepath.Join("..", "..", "testdata", "config_invalid_one_server.json"))
+func TestValidate_duplicateFileIDs(t *testing.T) {
+	path := writeConfigFile(t, `{
+  "files": [
+    {
+      "id": "same",
+      "servers": [
+        { "id": "blue", "url": "https://blue.example/db1", "username": "u", "password": "p" },
+        { "id": "green", "url": "https://green.example/db1", "username": "u", "password": "p" }
+      ],
+      "tables": [{ "name": "People" }]
+    },
+    {
+      "id": "same",
+      "servers": [
+        { "id": "blue", "url": "https://blue.example/db2", "username": "u", "password": "p" },
+        { "id": "green", "url": "https://green.example/db2", "username": "u", "password": "p" }
+      ],
+      "tables": [{ "name": "Forms" }]
+    }
+  ]
+}`)
+	_, err := LoadFile(path)
 	if err == nil {
-		t.Fatal("expected error")
+		t.Fatal("expected duplicate id error")
+	}
+}
+
+func TestLoadFile_AllowsOmittedTablesForAutoDiscovery(t *testing.T) {
+	path := writeConfigFile(t, `{
+  "files": [
+    {
+      "id": "auto",
+      "servers": [
+        { "id": "blue", "url": "https://blue.example/db", "username": "u", "password": "p" },
+        { "id": "green", "url": "https://green.example/db", "username": "u", "password": "p" }
+      ]
+    }
+  ]
+}`)
+	c, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Files) != 1 || len(c.Files[0].Tables) != 0 {
+		t.Fatalf("expected auto-discovery config with no explicit tables, got %+v", c.Files)
 	}
 }
 
@@ -81,5 +149,18 @@ func TestBootstrapMode_defaultAndBinary(t *testing.T) {
 	c.BootstrapMode = "bogus"
 	if c.BootstrapBinary() {
 		t.Fatal("unknown bootstrap mode should fall back to fixed")
+	}
+}
+
+func TestPKMod_UsesFileDefaultsOverride(t *testing.T) {
+	c := &Config{
+		Defaults: Defaults{PrimaryKey: "id", ModifiedField: "ModificationTimestamp"},
+	}
+	f := FileConfig{
+		Defaults: Defaults{PrimaryKey: "uuid", ModifiedField: "UpdatedAt"},
+	}
+	pk, mod := c.PKMod(f, TableSpec{Name: "People"})
+	if pk != "uuid" || mod != "UpdatedAt" {
+		t.Fatalf("got pk=%q mod=%q", pk, mod)
 	}
 }

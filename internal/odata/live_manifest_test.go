@@ -22,7 +22,10 @@ func TestLive_fetchPeopleManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blue, _, err := cfg.BlueGreen()
+	if len(cfg.Files) == 0 {
+		t.Fatal("config has no files")
+	}
+	blue, _, err := cfg.Files[0].BlueGreen()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,76 +46,139 @@ type Options struct {
 	Logger    *log.Logger
 }
 
-// Once executes sync for all configured tables (delete journal not wired — passes nil).
-func Once(ctx context.Context, cfg *config.Config, opt Options) error {
-	logf := func(format string, args ...any) {
-		if opt.Logger != nil {
-			opt.Logger.Printf(format, args...)
-		} else {
-			fmt.Printf(format+"\n", args...)
+// runSummary aggregates per-pass stats for the closing log lines.
+type runSummary struct {
+	skippedEmptyName int
+	tablesTotal      int
+	unchanged        int // len(plan)==0 after one-way filter
+	pendingTables    int // len(plan)>0, dry-run
+	appliedTables    int // len(plan)>0, apply mode
+	pendingOps       int // row-level ops in dry-run tables
+	appliedOps       int // row-level ops in applied tables (excludes deferred)
+	deferredOps      int
+	byKind           [4]int // domain OpKind indices 0..3
+	// Manifest sizes summed across tables (each len = distinct record ids in that table’s sync window).
+	manifestEntriesBlue  int
+	manifestEntriesGreen int
+}
+
+func (s *runSummary) addKinds(plan []domain.Op) {
+	for _, op := range plan {
+		i := int(op.Kind)
+		if i >= 0 && i < len(s.byKind) {
+			s.byKind[i]++
 		}
 	}
-	debugf := func(format string, args ...any) {
-		if opt.Verbose {
-			logf(format, args...)
+}
+
+func (s *runSummary) merge(other runSummary) {
+	s.skippedEmptyName += other.skippedEmptyName
+	s.tablesTotal += other.tablesTotal
+	s.unchanged += other.unchanged
+	s.pendingTables += other.pendingTables
+	s.appliedTables += other.appliedTables
+	s.pendingOps += other.pendingOps
+	s.appliedOps += other.appliedOps
+	s.deferredOps += other.deferredOps
+	s.manifestEntriesBlue += other.manifestEntriesBlue
+	s.manifestEntriesGreen += other.manifestEntriesGreen
+	for i := range s.byKind {
+		s.byKind[i] += other.byKind[i]
+	}
+}
+
+func formatKindCounts(byKind [4]int) string {
+	var b strings.Builder
+	for k := 0; k < len(byKind); k++ {
+		if byKind[k] == 0 {
+			continue
 		}
+		if b.Len() > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(domain.OpKind(k).String())
+		b.WriteString(":")
+		b.WriteString(strconv.Itoa(byKind[k]))
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return b.String()
+}
+
+func prefixLogf(fileID string, logf func(string, ...any)) func(string, ...any) {
+	return func(format string, args ...any) {
+		allArgs := make([]any, 0, len(args)+1)
+		allArgs = append(allArgs, fileID)
+		allArgs = append(allArgs, args...)
+		logf("file %s: "+format, allArgs...)
+	}
+}
+
+func logScopeSummary(header string, logf func(string, ...any), sum runSummary, d time.Duration, apply bool, oneWay string) {
+	kinds := formatKindCounts(sum.byKind)
+	workOps := sum.pendingOps + sum.appliedOps
+	oneWayLabel := oneWay
+	if oneWayLabel == "" {
+		oneWayLabel = "bidirectional"
+	}
+	kindsPart := ""
+	if kinds != "" && workOps > 0 {
+		kindsPart = fmt.Sprintf(" opKinds=%s", kinds)
 	}
 
-	mode, err := normalizeOneWayMode(opt.OneWay)
-	if err != nil {
-		return err
-	}
+	logf("--- %s ---", header)
+	logf("summary: duration=%s oneWay=%s apply=%v tablesProcessed=%d manifestRowsBlue=%d manifestRowsGreen=%d (per-table id counts summed)",
+		d.Round(time.Millisecond), oneWayLabel, apply, sum.tablesTotal, sum.manifestEntriesBlue, sum.manifestEntriesGreen)
 
-	blueSrv, greenSrv, err := cfg.BlueGreen()
+	if apply {
+		logf("summary: unchangedTables=%d tablesWithRowOps=%d rowOpsPlanned=%d rowOpsDeferred=%d%s",
+			sum.unchanged, sum.appliedTables, sum.appliedOps, sum.deferredOps, kindsPart)
+	} else {
+		logf("summary: unchangedTables=%d tablesWithPendingRowOps=%d pendingRowOps=%d (dry-run: no writes; checkpoints not advanced for op tables)%s",
+			sum.unchanged, sum.pendingTables, sum.pendingOps, kindsPart)
+	}
+	if sum.skippedEmptyName > 0 {
+		logf("summary: skipped %d table entries with empty name", sum.skippedEmptyName)
+	}
+}
+
+func logRunSummary(logf func(string, ...any), sum runSummary, d time.Duration, apply bool, oneWay string, filesProcessed, filesSucceeded int, failedFileIDs []string) {
+	logScopeSummary("run summary", logf, sum, d, apply, oneWay)
+	logf("summary: filesProcessed=%d filesSucceeded=%d filesFailed=%d", filesProcessed, filesSucceeded, len(failedFileIDs))
+	if len(failedFileIDs) > 0 {
+		logf("summary: failedFiles=%s", strings.Join(failedFileIDs, ","))
+	}
+}
+
+func runFileGroup(ctx context.Context, cfg *config.Config, file config.FileConfig, opt Options, overlap, lookback, maxLookback time.Duration, schemaMode string, logf func(string, ...any), debugf func(string, ...any)) (runSummary, error) {
+	var sum runSummary
+
+	blueSrv, greenSrv, err := file.BlueGreen()
 	if err != nil {
-		return err
+		return sum, err
 	}
 	httpClient := &http.Client{Timeout: 2 * time.Minute}
 	blueClient := &odata.Client{BaseURL: odata.TrimBase(blueSrv.URL), Username: blueSrv.Username, Password: blueSrv.Password, HTTPClient: httpClient, Logf: logf}
 	greenClient := &odata.Client{BaseURL: odata.TrimBase(greenSrv.URL), Username: greenSrv.Username, Password: greenSrv.Password, HTTPClient: httpClient, Logf: logf}
 
-	overlap := time.Duration(cfg.OverlapMinutes) * time.Minute
-	if cfg.OverlapMinutes <= 0 {
-		overlap = 10 * time.Minute
-	}
-
-	lookback, err := timespec.Parse(cfg.InitialLookback)
-	if err != nil {
-		return fmt.Errorf("initialLookback: %w", err)
-	}
-	if lookback <= 0 {
-		lookback = 24 * time.Hour
-	}
-	maxLookback := 90 * 24 * time.Hour
-	if strings.TrimSpace(cfg.MaxLookback) != "" {
-		maxLookback, err = timespec.Parse(cfg.MaxLookback)
-		if err != nil {
-			return fmt.Errorf("maxLookback: %w", err)
-		}
-		if maxLookback <= 0 {
-			maxLookback = 90 * 24 * time.Hour
-		}
-	}
-
 	now := time.Now().UTC()
-	schemaMode := strings.ToLower(strings.TrimSpace(cfg.SchemaMode))
-	if schemaMode == "" {
-		schemaMode = "intersection"
-	}
 	if schemaMode != "intersection" {
-		return fmt.Errorf("unsupported schemaMode %q (only \"intersection\")", cfg.SchemaMode)
+		return sum, fmt.Errorf("unsupported schemaMode %q (only \"intersection\")", cfg.SchemaMode)
 	}
 
-	for _, tbl := range cfg.Tables {
+	for _, tbl := range file.Tables {
 		if tbl.Name == "" {
+			sum.skippedEmptyName++
 			continue
 		}
-		pk, mod := cfg.PKMod(tbl)
+		sum.tablesTotal++
+		pk, mod := cfg.PKMod(file, tbl)
 
 		var window domain.SyncWindow
-		safe, ok, err := state.LoadSafeThrough(opt.StatePath, tbl.Name)
+		safe, ok, err := state.LoadSafeThrough(opt.StatePath, file.ID, tbl.Name)
 		if err != nil {
-			return err
+			return sum, err
 		}
 		if !ok {
 			start := now.Add(-lookback)
@@ -158,34 +222,42 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 		tableStart := time.Now()
 		mBlue, mGreen, err := fetchManifestPair(ctx, blueClient, greenClient, tbl.Name, window, pk, mod, logf, debugf)
 		if err != nil {
-			return err
+			return sum, err
 		}
+		sum.manifestEntriesBlue += len(mBlue)
+		sum.manifestEntriesGreen += len(mGreen)
 
 		planAll := domain.BuildPlan(mBlue, mGreen, nil)
-		plan := filterPlanOneWay(planAll, mode)
+		plan := filterPlanOneWay(planAll, opt.OneWay)
 
 		if len(plan) > 0 && !opt.Apply {
-			logTablePlan(logf, tbl.Name, len(mBlue), len(mGreen), plan, mode, len(planAll)-len(plan), tableStart)
+			sum.pendingTables++
+			sum.pendingOps += len(plan)
+			sum.addKinds(plan)
+			logTablePlan(logf, tbl.Name, len(mBlue), len(mGreen), plan, opt.OneWay, len(planAll)-len(plan), tableStart)
 			logf("table %s: dry-run only — not applying, verifying, or advancing checkpoint (use -apply)", tbl.Name)
 			continue
 		}
 		if len(plan) == 0 {
-			// Nothing to apply and no writes happened, so a second manifest verify pass is unnecessary.
-			if err := state.SaveSafeThrough(opt.StatePath, tbl.Name, window.End); err != nil {
-				return err
+			sum.unchanged++
+			if err := state.SaveSafeThrough(opt.StatePath, file.ID, tbl.Name, window.End); err != nil {
+				return sum, err
 			}
 			logf("table %s: scanned blue=%d green=%d ops=0 checkpoint=%s duration=%s", tbl.Name, len(mBlue), len(mGreen), window.End.Format(time.RFC3339), time.Since(tableStart).Round(time.Millisecond))
 			continue
 		}
-		logTablePlan(logf, tbl.Name, len(mBlue), len(mGreen), plan, mode, len(planAll)-len(plan), tableStart)
+		sum.appliedTables++
+		sum.appliedOps += len(plan)
+		sum.addKinds(plan)
+		logTablePlan(logf, tbl.Name, len(mBlue), len(mGreen), plan, opt.OneWay, len(planAll)-len(plan), tableStart)
 
 		blueProps, greenProps, err := entityPropertiesPair(ctx, blueClient, greenClient, tbl.Name, logf)
 		if err != nil {
-			return err
+			return sum, err
 		}
 		allowed := buildSyncFieldAllowlist(blueProps, greenProps, tbl.FieldOverrides, tbl.IgnoreFields, pk, mod)
 		if len(allowed) == 0 {
-			return fmt.Errorf("%s: no sync fields after metadata + overrides", tbl.Name)
+			return sum, fmt.Errorf("%s: no sync fields after metadata + overrides", tbl.Name)
 		}
 
 		var deferred []deferredIssue
@@ -203,7 +275,7 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 				debugf("table %s: apply batch %d/%d ops=%d", tbl.Name, bi+1, totalBatches, len(chunk))
 				batchDeferred, err := applyPlan(ctx, blueClient, greenClient, tbl.Name, chunk, allowed, pk, mod, maxWorkers, i, len(plan), logf)
 				if err != nil {
-					return fmt.Errorf("%s apply batch %d: %w", tbl.Name, bi+1, err)
+					return sum, fmt.Errorf("%s apply batch %d: %w", tbl.Name, bi+1, err)
 				}
 				deferred = append(deferred, batchDeferred...)
 			}
@@ -212,21 +284,19 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 				for i := 0; i < len(deferred) && i < 10; i++ {
 					logf("table %s: deferred %s %s reason=%s", tbl.Name, deferred[i].Kind, deferred[i].RecordID, deferred[i].Reason)
 				}
-				if err := appendDeferredIssues(opt.StatePath, tbl.Name, deferred); err != nil {
+				if err := appendDeferredIssues(opt.StatePath, file.ID, tbl.Name, deferred); err != nil {
 					logf("table %s: warning: could not persist deferred issues: %v", tbl.Name, err)
 				}
 			}
+			sum.deferredOps += len(deferred)
 		}
 
-		// Rows written during apply get ModificationTimestamp at insert time, often after the
-		// window.End captured at run start — widen checkpoint upper bound.
 		endThrough := window.End
 		if opt.Apply && len(plan) > 0 {
 			endThrough = time.Now().UTC()
 		}
 
 		if cfg.VerifyStrict() && len(deferred) == 0 {
-			// Verify: re-fetch manifests; expect empty plan.
 			var mBlue2 map[string]time.Time
 			debugf("table %s: verify fetch blue manifest...", tbl.Name)
 			err = withHeartbeat(ctx, 10*time.Second, logf, fmt.Sprintf("table %s: verify blue request", tbl.Name), func() error {
@@ -237,7 +307,7 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 				return fetchErr
 			})
 			if err != nil {
-				return fmt.Errorf("%s verify blue: %w", tbl.Name, err)
+				return sum, fmt.Errorf("%s verify blue: %w", tbl.Name, err)
 			}
 			var mGreen2 map[string]time.Time
 			debugf("table %s: verify fetch green manifest...", tbl.Name)
@@ -249,19 +319,17 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 				return fetchErr
 			})
 			if err != nil {
-				return fmt.Errorf("%s verify green: %w", tbl.Name, err)
+				return sum, fmt.Errorf("%s verify green: %w", tbl.Name, err)
 			}
 			plan2All := domain.BuildPlan(mBlue2, mGreen2, nil)
-			plan2 := filterPlanOneWay(plan2All, mode)
+			plan2 := filterPlanOneWay(plan2All, opt.OneWay)
 			if len(plan2) > 0 {
-				// FileMaker bumps ModificationTimestamp on each write; pure LWW on timestamps may
-				// still suggest copy ops even when replicated fields already match — confirm payload equality.
 				if err := verifyReplicaFields(ctx, blueClient, greenClient, tbl.Name, plan2, allowed, pk, mod); err != nil {
-					return fmt.Errorf("%s verify failed (%d pending time-order ops): %w", tbl.Name, len(plan2), err)
+					return sum, fmt.Errorf("%s verify failed (%d pending time-order ops): %w", tbl.Name, len(plan2), err)
 				}
 				logf("table %s: verify ok (%d time-order ops ignored — replicated fields match)", tbl.Name, len(plan2))
-			} else if mode != "" && len(plan2All) > 0 {
-				logf("table %s: verify ok (oneWay=%s filtered %d opposite-direction ops)", tbl.Name, mode, len(plan2All))
+			} else if opt.OneWay != "" && len(plan2All) > 0 {
+				logf("table %s: verify ok (oneWay=%s filtered %d opposite-direction ops)", tbl.Name, opt.OneWay, len(plan2All))
 			}
 		} else if cfg.VerifyStrict() && len(deferred) > 0 {
 			logf("table %s: verify skipped (deferredOps=%d)", tbl.Name, len(deferred))
@@ -269,10 +337,97 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 			debugf("table %s: verify skipped (verifyMode=off)", tbl.Name)
 		}
 
-		if err := state.SaveSafeThrough(opt.StatePath, tbl.Name, endThrough); err != nil {
-			return err
+		if err := state.SaveSafeThrough(opt.StatePath, file.ID, tbl.Name, endThrough); err != nil {
+			return sum, err
 		}
 		logf("table %s: checkpoint advanced to %s duration=%s", tbl.Name, endThrough.Format(time.RFC3339), time.Since(tableStart).Round(time.Millisecond))
+	}
+	return sum, nil
+}
+
+// Once executes sync for all configured files (delete journal not wired — passes nil).
+func Once(ctx context.Context, cfg *config.Config, opt Options) error {
+	baseLogf := func(format string, args ...any) {
+		if opt.Logger != nil {
+			opt.Logger.Printf(format, args...)
+		} else {
+			fmt.Printf(format+"\n", args...)
+		}
+	}
+
+	mode, err := normalizeOneWayMode(opt.OneWay)
+	if err != nil {
+		return err
+	}
+
+	overlap := time.Duration(cfg.OverlapMinutes) * time.Minute
+	if cfg.OverlapMinutes <= 0 {
+		overlap = 10 * time.Minute
+	}
+
+	lookback, err := timespec.Parse(cfg.InitialLookback)
+	if err != nil {
+		return fmt.Errorf("initialLookback: %w", err)
+	}
+	if lookback <= 0 {
+		lookback = 24 * time.Hour
+	}
+	maxLookback := 90 * 24 * time.Hour
+	if strings.TrimSpace(cfg.MaxLookback) != "" {
+		maxLookback, err = timespec.Parse(cfg.MaxLookback)
+		if err != nil {
+			return fmt.Errorf("maxLookback: %w", err)
+		}
+		if maxLookback <= 0 {
+			maxLookback = 90 * 24 * time.Hour
+		}
+	}
+
+	schemaMode := strings.ToLower(strings.TrimSpace(cfg.SchemaMode))
+	if schemaMode == "" {
+		schemaMode = "intersection"
+	}
+	if schemaMode != "intersection" {
+		return fmt.Errorf("unsupported schemaMode %q (only \"intersection\")", cfg.SchemaMode)
+	}
+
+	runStarted := time.Now()
+	var total runSummary
+	filesProcessed := 0
+	filesSucceeded := 0
+	var failedFileIDs []string
+
+	for _, file := range cfg.Files {
+		filesProcessed++
+		fileStarted := time.Now()
+		fileLogf := prefixLogf(file.ID, baseLogf)
+		fileDebugf := func(format string, args ...any) {
+			if opt.Verbose {
+				fileLogf(format, args...)
+			}
+		}
+
+		fileSum, err := runFileGroup(ctx, cfg, file, Options{
+			Apply:     opt.Apply,
+			OneWay:    mode,
+			StatePath: opt.StatePath,
+			Verbose:   opt.Verbose,
+			Logger:    opt.Logger,
+		}, overlap, lookback, maxLookback, schemaMode, fileLogf, fileDebugf)
+		total.merge(fileSum)
+		if err != nil {
+			failedFileIDs = append(failedFileIDs, file.ID)
+			fileLogf("run failed: %v", err)
+			logScopeSummary("file summary", fileLogf, fileSum, time.Since(fileStarted), opt.Apply, mode)
+			continue
+		}
+		filesSucceeded++
+		logScopeSummary("file summary", fileLogf, fileSum, time.Since(fileStarted), opt.Apply, mode)
+	}
+
+	logRunSummary(baseLogf, total, time.Since(runStarted), opt.Apply, mode, filesProcessed, filesSucceeded, failedFileIDs)
+	if len(failedFileIDs) > 0 {
+		return fmt.Errorf("files failed: %s", strings.Join(failedFileIDs, ","))
 	}
 	return nil
 }
@@ -723,7 +878,7 @@ sendLoop:
 	}
 }
 
-func appendDeferredIssues(statePath, table string, issues []deferredIssue) error {
+func appendDeferredIssues(statePath, fileID, table string, issues []deferredIssue) error {
 	if len(issues) == 0 {
 		return nil
 	}
@@ -741,6 +896,7 @@ func appendDeferredIssues(statePath, table string, issues []deferredIssue) error
 	for _, iss := range issues {
 		row := map[string]any{
 			"ts":       time.Now().UTC().Format(time.RFC3339Nano),
+			"fileId":   fileID,
 			"table":    table,
 			"recordId": iss.RecordID,
 			"kind":     iss.Kind,

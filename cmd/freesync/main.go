@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DelfsEngineering/FreeSync/internal/config"
+	"github.com/DelfsEngineering/FreeSync/internal/odata"
 	"github.com/DelfsEngineering/FreeSync/internal/run"
 	"github.com/DelfsEngineering/FreeSync/internal/state"
 )
@@ -67,6 +68,9 @@ func runCLI(flagArgs []string) error {
 	if err != nil {
 		return err
 	}
+	// Table logs and run summary use the default logger; send to stdout so
+	// pipelines like `./freesync run ... | tail -n 30` include them (stderr is not piped).
+	log.SetOutput(os.Stdout)
 	return loadAndRunOnce(context.Background(), configPath, statePath, *apply, mode, verbose, log.Default())
 }
 
@@ -119,12 +123,18 @@ func loadAndRunOnce(ctx context.Context, configPath, statePath string, apply boo
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+	if err := resolveFileTables(ctx, cfg, logger, verbose); err != nil {
+		return fmt.Errorf("resolve tables: %w", err)
+	}
 
 	logger.Printf("Free Sync — config %q apply=%v oneWay=%q verbose=%v", configPath, apply, oneWay, verbose)
-	for _, s := range cfg.Servers {
-		logger.Printf("  server %s: %s (user %s)", s.ID, s.URL, s.Username)
+	for _, f := range cfg.Files {
+		logger.Printf("  file %s:", f.ID)
+		for _, s := range f.Servers {
+			logger.Printf("    server %s: %s (user %s)", s.ID, s.URL, s.Username)
+		}
 	}
-	logger.Printf("  overlap: %s  tables: %d  schemaMode: %s", cfg.Overlap(), len(cfg.Tables), cfg.SchemaMode)
+	logger.Printf("  overlap: %s  files: %d  tables: %d  schemaMode: %s", cfg.Overlap(), len(cfg.Files), cfg.TotalTableCount(), cfg.SchemaMode)
 	verifyMode := "off"
 	if cfg.VerifyStrict() {
 		verifyMode = "strict"
@@ -136,20 +146,70 @@ func loadAndRunOnce(ctx context.Context, configPath, statePath string, apply boo
 	} else {
 		logger.Printf("  checkpoint file: %s (will create on first advance)", statePath)
 	}
-	for _, tbl := range cfg.Tables {
-		if tbl.Name == "" {
-			continue
-		}
-		ts, ok, err := state.LoadSafeThrough(statePath, tbl.Name)
-		if err != nil {
-			return fmt.Errorf("checkpoint: %w", err)
-		}
-		if ok && verbose {
-			logger.Printf("  [%s] safeThrough=%s", tbl.Name, ts.UTC().Format(time.RFC3339))
+	for _, f := range cfg.Files {
+		for _, tbl := range f.Tables {
+			if tbl.Name == "" {
+				continue
+			}
+			ts, ok, err := state.LoadSafeThrough(statePath, f.ID, tbl.Name)
+			if err != nil {
+				return fmt.Errorf("checkpoint: %w", err)
+			}
+			if ok && verbose {
+				logger.Printf("  [%s/%s] safeThrough=%s", f.ID, tbl.Name, ts.UTC().Format(time.RFC3339))
+			}
 		}
 	}
 	if err := run.Once(ctx, cfg, run.Options{Apply: apply, OneWay: oneWay, StatePath: statePath, Verbose: verbose, Logger: logger}); err != nil {
 		return err
+	}
+	return nil
+}
+
+func resolveFileTables(ctx context.Context, cfg *config.Config, logger *log.Logger, verbose bool) error {
+	for i := range cfg.Files {
+		file := &cfg.Files[i]
+		if len(file.Tables) > 0 {
+			continue
+		}
+		blue, green, err := file.BlueGreen()
+		if err != nil {
+			return fmt.Errorf("file %s: %w", file.ID, err)
+		}
+		httpClient := &http.Client{Timeout: 2 * time.Minute}
+		blueCli := &odata.Client{BaseURL: odata.TrimBase(blue.URL), Username: blue.Username, Password: blue.Password, HTTPClient: httpClient}
+		greenCli := &odata.Client{BaseURL: odata.TrimBase(green.URL), Username: green.Username, Password: green.Password, HTTPClient: httpClient}
+
+		blueTables, err := odata.BaseTableNames(ctx, blueCli)
+		if err != nil {
+			return fmt.Errorf("file %s blue base tables: %w", file.ID, err)
+		}
+		greenTables, err := odata.BaseTableNames(ctx, greenCli)
+		if err != nil {
+			return fmt.Errorf("file %s green base tables: %w", file.ID, err)
+		}
+
+		greenSet := make(map[string]struct{}, len(greenTables))
+		for _, name := range greenTables {
+			greenSet[name] = struct{}{}
+		}
+		discovered := make([]config.TableSpec, 0, len(blueTables))
+		for _, name := range blueTables {
+			if _, ok := greenSet[name]; ok {
+				discovered = append(discovered, config.TableSpec{Name: name})
+			}
+		}
+		file.Tables = discovered
+		if logger != nil {
+			logger.Printf("  file %s: auto-discovered %d base tables from blue/green intersection", file.ID, len(discovered))
+			if verbose && len(discovered) > 0 {
+				names := make([]string, 0, len(discovered))
+				for _, tbl := range discovered {
+					names = append(names, tbl.Name)
+				}
+				logger.Printf("  file %s: base tables = %s", file.ID, strings.Join(names, ", "))
+			}
+		}
 	}
 	return nil
 }

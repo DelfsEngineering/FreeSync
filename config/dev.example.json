@@ -1,32 +1,35 @@
 {
-  "_comment": "Copy to config/dev.local.json and fill secrets. dev.local.json is gitignored. OData /fmi/odata/v4/{db} is case-sensitive; use the exact name from GET /fmi/odata/v4 on the host. Per table, fieldOverrides lists extra fields to sync (e.g. calculated); ignoreFields excludes local auto-enter/generated fields.",
-  "servers": [
-    {
-      "id": "blue",
-      "url": "https://your-host.example/fmi/odata/v4/YourDatabaseBlue",
-      "username": "filemaker_account",
-      "password": "use-env-or-local-file-not-git"
-    },
-    {
-      "id": "green",
-      "url": "https://your-host.example/fmi/odata/v4/YourDatabaseGreen",
-      "username": "filemaker_account",
-      "password": "use-env-or-local-file-not-git"
-    }
-  ],
-  "tables": [
-    {
-      "name": "People",
-      "primaryKey": "id",
-      "modifiedField": "ModificationTimestamp",
-      "fieldOverrides": [],
-      "ignoreFields": ["thumbURL"]
-    }
-  ],
+  "_comment": "Copy to config/dev.local.json and fill secrets. dev.local.json is gitignored. Define one entry in files[] per FileMaker catalog you want synced. OData /fmi/odata/v4/{db} is case-sensitive; use the exact name from GET /fmi/odata/v4 on the host. files[].tables is optional: omit it to auto-discover only base tables from FileMaker_BaseTables on both sides. If you do provide tables, that explicit list wins. Per table, fieldOverrides lists extra fields to sync (e.g. calculated); ignoreFields excludes local auto-enter/generated fields.",
   "defaults": {
     "primaryKey": "id",
     "modifiedField": "ModificationTimestamp"
   },
+  "files": [
+    {
+      "id": "your_database",
+      "servers": [
+        {
+          "id": "blue",
+          "url": "https://your-host.example/fmi/odata/v4/YourDatabaseBlue",
+          "username": "filemaker_account",
+          "password": "use-env-or-local-file-not-git"
+        },
+        {
+          "id": "green",
+          "url": "https://your-host.example/fmi/odata/v4/YourDatabaseGreen",
+          "username": "filemaker_account",
+          "password": "use-env-or-local-file-not-git"
+        }
+      ],
+      "tables": [
+        {
+          "name": "People",
+          "fieldOverrides": [],
+          "ignoreFields": ["thumbURL"]
+        }
+      ]
+    }
+  ],
   "overlapMinutes": 10,
   "initialLookback": "1d",
   "maxLookback": "90d",

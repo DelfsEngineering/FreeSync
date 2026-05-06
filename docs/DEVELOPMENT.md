@@ -33,6 +33,14 @@ FREESYNC_CONFIG=config/dev.local.json go run ./cmd/freesync run
 FREESYNC_CONFIG=config/dev.local.json go run ./cmd/freesync run -apply
 ```
 
+Config note:
+
+- `config/dev.local.json` now uses a top-level `files[]` array.
+- Each file entry defines its own `blue`/`green` OData URLs.
+- `files[].tables` is optional; omitting it auto-discovers the blue/green base-table intersection via `FileMaker_BaseTables`.
+- If `files[].tables` is present, that explicit list takes precedence over auto-discovery.
+- `data/sync-state.json` stores per-file checkpoints in one JSON file.
+
 ## Layout
 
 | Path | Role |
