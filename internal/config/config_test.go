@@ -20,6 +20,9 @@ func TestLoadFile_example(t *testing.T) {
 	if c.Defaults.PrimaryKey != "id" {
 		t.Fatal("defaults")
 	}
+	if len(c.Tables) == 0 || len(c.Tables[0].IgnoreFields) != 1 || c.Tables[0].IgnoreFields[0] != "thumbURL" {
+		t.Fatalf("ignoreFields not loaded from example: %+v", c.Tables)
+	}
 }
 
 func TestValidate_twoServers(t *testing.T) {

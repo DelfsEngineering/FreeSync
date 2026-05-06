@@ -19,14 +19,14 @@ import (
 	"github.com/DelfsEngineering/FreeSync/internal/state"
 )
 
-type runOnceFunc func(ctx context.Context, configPath, statePath string, apply bool, logger *log.Logger) error
+type runOnceFunc func(ctx context.Context, configPath, statePath string, apply bool, oneWay string, logger *log.Logger) error
 
 func main() {
 	cmd, before, after, ok := parseCommand(os.Args[1:])
 	if !ok {
 		fmt.Fprintln(os.Stderr, "usage: freesync <run|serve> [flags]")
-		fmt.Fprintln(os.Stderr, "  run   [-config path] [-state path] [-apply]")
-		fmt.Fprintln(os.Stderr, "  serve [-config path] [-state path] [-listen :8080] [-apply] [-token secret]")
+		fmt.Fprintln(os.Stderr, "  run   [-config path] [-state path] [-apply] [-one-way to-blue|to-green]")
+		fmt.Fprintln(os.Stderr, "  serve [-config path] [-state path] [-listen :8080] [-apply] [-one-way to-blue|to-green] [-token secret]")
 		os.Exit(2)
 	}
 	flagArgs := append(append([]string{}, before...), after...)
@@ -52,14 +52,20 @@ func main() {
 func runCLI(flagArgs []string) error {
 	configPath := defaultConfigPath()
 	statePath := defaultStatePath()
+	oneWay := strings.TrimSpace(os.Getenv("FREESYNC_ONE_WAY"))
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	apply := fs.Bool("apply", false, "execute writes (PATCH/POST); default is dry-run")
+	fs.StringVar(&oneWay, "one-way", oneWay, "optional write direction filter: to-blue or to-green")
 	fs.StringVar(&configPath, "config", configPath, "path to JSON config")
 	fs.StringVar(&statePath, "state", statePath, "path to checkpoint file (JSON)")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
-	return loadAndRunOnce(context.Background(), configPath, statePath, *apply, log.Default())
+	mode, err := normalizeOneWay(oneWay)
+	if err != nil {
+		return err
+	}
+	return loadAndRunOnce(context.Background(), configPath, statePath, *apply, mode, log.Default())
 }
 
 func serveHTTP(flagArgs []string) error {
@@ -70,6 +76,7 @@ func serveHTTP(flagArgs []string) error {
 		listen = ":8080"
 	}
 	token := os.Getenv("FREESYNC_TRIGGER_TOKEN")
+	oneWayDefault := strings.TrimSpace(os.Getenv("FREESYNC_ONE_WAY"))
 	applyDefault := true
 	if v := strings.TrimSpace(os.Getenv("FREESYNC_APPLY")); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -85,25 +92,31 @@ func serveHTTP(flagArgs []string) error {
 	fs.StringVar(&listen, "listen", listen, "HTTP listen address")
 	fs.StringVar(&token, "token", token, "optional bearer token for POST /run")
 	fs.BoolVar(&applyDefault, "apply", applyDefault, "default apply mode for POST /run")
+	fs.StringVar(&oneWayDefault, "one-way", oneWayDefault, "default direction filter for POST /run: to-blue or to-green")
 	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	var err error
+	oneWayDefault, err = normalizeOneWay(oneWayDefault)
+	if err != nil {
 		return err
 	}
 
 	log.SetOutput(os.Stdout)
 	log.SetFlags(0)
 	logger := log.Default()
-	logger.Printf("Free Sync API listening on %s (defaultApply=%v)", listen, applyDefault)
+	logger.Printf("Free Sync API listening on %s (defaultApply=%v oneWay=%q)", listen, applyDefault, oneWayDefault)
 
-	return http.ListenAndServe(listen, newServerHandler(configPath, statePath, token, applyDefault, logger, loadAndRunOnce))
+	return http.ListenAndServe(listen, newServerHandler(configPath, statePath, token, applyDefault, oneWayDefault, logger, loadAndRunOnce))
 }
 
-func loadAndRunOnce(ctx context.Context, configPath, statePath string, apply bool, logger *log.Logger) error {
+func loadAndRunOnce(ctx context.Context, configPath, statePath string, apply bool, oneWay string, logger *log.Logger) error {
 	cfg, err := config.LoadFile(configPath)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 
-	logger.Printf("Free Sync — config %q apply=%v", configPath, apply)
+	logger.Printf("Free Sync — config %q apply=%v oneWay=%q", configPath, apply, oneWay)
 	for _, s := range cfg.Servers {
 		logger.Printf("  server %s: %s (user %s)", s.ID, s.URL, s.Username)
 	}
@@ -131,13 +144,13 @@ func loadAndRunOnce(ctx context.Context, configPath, statePath string, apply boo
 			logger.Printf("  [%s] safeThrough=%s", tbl.Name, ts.UTC().Format(time.RFC3339))
 		}
 	}
-	if err := run.Once(ctx, cfg, run.Options{Apply: apply, StatePath: statePath, Logger: logger}); err != nil {
+	if err := run.Once(ctx, cfg, run.Options{Apply: apply, OneWay: oneWay, StatePath: statePath, Logger: logger}); err != nil {
 		return err
 	}
 	return nil
 }
 
-func newServerHandler(configPath, statePath, token string, applyDefault bool, logger *log.Logger, runner runOnceFunc) http.Handler {
+func newServerHandler(configPath, statePath, token string, applyDefault bool, oneWayDefault string, logger *log.Logger, runner runOnceFunc) http.Handler {
 	var running atomic.Bool
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +176,7 @@ func newServerHandler(configPath, statePath, token string, applyDefault bool, lo
 		defer running.Store(false)
 
 		apply := applyDefault
+		oneWay := oneWayDefault
 		if q := strings.TrimSpace(r.URL.Query().Get("apply")); q != "" {
 			b, err := strconv.ParseBool(q)
 			if err != nil {
@@ -171,14 +185,23 @@ func newServerHandler(configPath, statePath, token string, applyDefault bool, lo
 			}
 			apply = b
 		}
+		if q := strings.TrimSpace(r.URL.Query().Get("oneWay")); q != "" {
+			mode, err := normalizeOneWay(q)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid oneWay query parameter"})
+				return
+			}
+			oneWay = mode
+		}
 
 		start := time.Now().UTC()
-		err := runner(r.Context(), configPath, statePath, apply, logger)
+		err := runner(r.Context(), configPath, statePath, apply, oneWay, logger)
 		dur := time.Since(start)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"ok":       false,
 				"apply":    apply,
+				"oneWay":   oneWay,
 				"duration": dur.String(),
 				"error":    err.Error(),
 			})
@@ -187,10 +210,22 @@ func newServerHandler(configPath, statePath, token string, applyDefault bool, lo
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":       true,
 			"apply":    apply,
+			"oneWay":   oneWay,
 			"duration": dur.String(),
 		})
 	})
 	return mux
+}
+
+func normalizeOneWay(raw string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "":
+		return "", nil
+	case "to-blue", "to-green":
+		return strings.TrimSpace(strings.ToLower(raw)), nil
+	default:
+		return "", fmt.Errorf("invalid one-way mode %q (expected to-blue or to-green)", raw)
+	}
 }
 
 func parseCommand(args []string) (cmd string, before, after []string, ok bool) {

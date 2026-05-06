@@ -107,22 +107,13 @@ func TestFetchManifestWithProgress_reportsPages(t *testing.T) {
 	}
 }
 
-func TestFetchManifest_manualSkipWhenNoNextLink(t *testing.T) {
-	// Simulate a server that supports $skip but does not emit @odata.nextLink.
+func TestFetchManifest_manualKeysetWhenNoNextLink(t *testing.T) {
+	// Simulate a server that does not emit @odata.nextLink.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q, _ := url.ParseQuery(r.URL.RawQuery)
-		skip := q.Get("$skip")
-		switch skip {
-		case "":
-			value := make([]map[string]any, 50)
-			for i := 0; i < 50; i++ {
-				value[i] = map[string]any{
-					"id":                    fmt.Sprintf("id-%03d", i),
-					"ModificationTimestamp": "2026-01-01T00:00:00Z",
-				}
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"value": value})
-		case "50":
+		filter := q.Get("$filter")
+		switch {
+		case strings.Contains(filter, "\"ModificationTimestamp\" gt 2026-01-01T00:00:00Z"):
 			value := make([]map[string]any, 30)
 			for i := 0; i < 30; i++ {
 				value[i] = map[string]any{
@@ -131,8 +122,17 @@ func TestFetchManifest_manualSkipWhenNoNextLink(t *testing.T) {
 				}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"value": value})
+		case strings.Contains(filter, "and (\"ModificationTimestamp\" gt"):
+			t.Fatalf("unexpected keyset cursor in filter: %q", filter)
 		default:
-			t.Fatalf("unexpected $skip=%q", skip)
+			value := make([]map[string]any, 50)
+			for i := 0; i < 50; i++ {
+				value[i] = map[string]any{
+					"id":                    fmt.Sprintf("id-%03d", i),
+					"ModificationTimestamp": "2026-01-01T00:00:00Z",
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": value})
 		}
 	}))
 	defer srv.Close()
@@ -152,12 +152,31 @@ func TestFetchManifest_manualSkipWhenNoNextLink(t *testing.T) {
 func TestManifestPageURL_includesQuotedSelect(t *testing.T) {
 	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
-	u, err := manifestPageURL("https://example.test/base", "People", start, end, "id", "ModificationTimestamp", "", 50, 0)
+	u, err := manifestPageURL("https://example.test/base", "People", start, end, "id", "ModificationTimestamp", "", 50, "", time.Time{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(u, "$select=%22id%22,%22ModificationTimestamp%22") {
 		t.Fatalf("expected quoted select in url, got %s", u)
+	}
+	if !strings.Contains(u, "$orderby=%22ModificationTimestamp%22%20asc,%22id%22%20asc") {
+		t.Fatalf("expected stable quoted orderby in url, got %s", u)
+	}
+}
+
+func TestManifestPageURL_includesKeysetCursor(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	cursorMod := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	u, err := manifestPageURL("https://example.test/base", "People", start, end, "id", "ModificationTimestamp", "", 50, "abc-123", cursorMod, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(u, "%22ModificationTimestamp%22%20gt%202026-01-02T03:04:05Z") {
+		t.Fatalf("expected keyset cursor in filter, got %s", u)
+	}
+	if !strings.Contains(u, "%22id%22%20gt%20%27abc-123%27") {
+		t.Fatalf("expected keyset id clause in filter, got %s", u)
 	}
 }
 

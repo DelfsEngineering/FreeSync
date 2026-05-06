@@ -60,6 +60,9 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 		if contentType != "" {
 			req.Header.Set("Content-Type", contentType)
 		}
+		if method == http.MethodPatch || method == http.MethodPost {
+			req.Header.Set("Prefer", "return=minimal")
+		}
 
 		res, err := c.httpClient().Do(req)
 		if err != nil {

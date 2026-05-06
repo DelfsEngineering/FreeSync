@@ -97,3 +97,38 @@ func TestParseEntityProperties_computedAnnotation(t *testing.T) {
 		t.Fatal("fmCalc missing")
 	}
 }
+
+func TestParseEntityProperties_computedAnnotationWithoutBool(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="com.filemaker.odata.BetterForms_Helper_prod" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityContainer Name="Default">
+        <EntitySet Name="Inbox" EntityType="com.filemaker.odata.BetterForms_Helper_prod.Inbox_" />
+      </EntityContainer>
+      <EntityType Name="Inbox_">
+        <Property Name="id" Type="Edm.String" />
+        <Property Name="sizePayload" Type="Edm.Int32">
+          <Annotation Term="com.filemaker.odata.Calculation" />
+        </Property>
+      </EntityType>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>`
+	props, err := parseEntityProperties([]byte(xml), "Inbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, p := range props {
+		if p.Name == "sizePayload" {
+			saw = true
+			if !p.Computed {
+				t.Fatal("expected sizePayload computed=true when Calculation term is present without Bool")
+			}
+		}
+	}
+	if !saw {
+		t.Fatal("sizePayload missing")
+	}
+}

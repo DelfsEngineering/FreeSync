@@ -63,6 +63,7 @@ Do **not** commit host-specific URLs with real passwords. Use `config/dev.exampl
 - **`$select=id,field`** — comma-separated lists can **fail** URL parsing (treats `id,field` as one name). Free Sync **omits `$select`** for manifest passes and reads keys from full rows.
 - **`$orderby=A asc,B asc`** — comma in `$orderby` can **fail** parsing. Use a **single** order column (e.g. `ModificationTimestamp asc`) for paging.
 - Query encoding — prefer **spaces as `%20`**; avoid `+` for spaces in some deployments.
+- Auto-enter / local-generated fields can appear writable in OData metadata even though FileMaker rewrites them during record updates. Configure these as table-level `ignoreFields` so Free Sync does not patch or verify replica-local generated values (for example `thumbURL` fields with embedded version counters).
 
 ## Live tests
 

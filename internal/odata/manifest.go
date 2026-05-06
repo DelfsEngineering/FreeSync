@@ -26,11 +26,13 @@ func FetchManifest(ctx context.Context, cli *Client, entitySet string, start, en
 func FetchManifestWithProgress(ctx context.Context, cli *Client, entitySet string, start, end time.Time, pkField, modField string, onPage func(pageNum, pageRows, totalRows int)) (map[string]time.Time, error) {
 	out := make(map[string]time.Time)
 	pageURL := ""
-	skip := 0
+	var cursorID string
+	var cursorMod time.Time
+	var hasCursor bool
 	pageNum := 0
 	for {
 		var err error
-		pageURL, err = manifestPageURL(cli.BaseURL, entitySet, start, end, pkField, modField, pageURL, manifestPageSize, skip)
+		pageURL, err = manifestPageURL(cli.BaseURL, entitySet, start, end, pkField, modField, pageURL, manifestPageSize, cursorID, cursorMod, hasCursor)
 		if err != nil {
 			return nil, err
 		}
@@ -75,12 +77,15 @@ func FetchManifestWithProgress(ctx context.Context, cli *Client, entitySet strin
 			pageURL = envelope.NextLink
 			continue
 		}
-		// FileMaker may omit @odata.nextLink for plain $top/$skip usage; page manually.
+		// FileMaker may omit @odata.nextLink for plain $top usage; page manually via keyset cursor.
 		if len(envelope.Value) < manifestPageSize {
 			break
 		}
+		cursorID, cursorMod, hasCursor, err = manifestCursor(envelope.Value, pkField, modField)
+		if err != nil {
+			return nil, err
+		}
 		pageURL = ""
-		skip += manifestPageSize
 		SleepThrottle(50 * time.Millisecond)
 	}
 	return out, nil
@@ -92,7 +97,7 @@ func FetchManifestHead(ctx context.Context, cli *Client, entitySet string, start
 	if top <= 0 {
 		top = 1
 	}
-	pageURL, err := manifestPageURL(cli.BaseURL, entitySet, start, end, pkField, modField, "", top, 0)
+	pageURL, err := manifestPageURL(cli.BaseURL, entitySet, start, end, pkField, modField, "", top, "", time.Time{}, false)
 	if err != nil {
 		return nil, err
 	}
@@ -132,38 +137,82 @@ func FetchManifestHead(ctx context.Context, cli *Client, entitySet string, start
 	return out, nil
 }
 
-func manifestPageURL(base, entitySet string, start, end time.Time, pkField, modField string, pageToken string, top, skip int) (string, error) {
+func manifestPageURL(base, entitySet string, start, end time.Time, pkField, modField string, pageToken string, top int, cursorID string, cursorMod time.Time, hasCursor bool) (string, error) {
 	if pageToken != "" {
 		return pageToken, nil
 	}
+	pkRef := quoteFilterField(pkField)
+	modRef := quoteFilterField(modField)
 	// FileMaker rejects url.Values-style encoding (e.g. %3A in timestamps). Encode only spaces and commas.
 	filter := fmt.Sprintf("%s ge %s and %s le %s",
-		modField,
+		modRef,
 		start.UTC().Format(time.RFC3339),
-		modField,
+		modRef,
 		end.UTC().Format(time.RFC3339),
 	)
-	// FileMaker OData rejects $select lists (comma) and multi-field $orderby (comma).
-	// On some FileMaker servers, comma-separated $select only works when each field
-	// name is wrapped in double quotes.
-	ord := modField + " asc"
+	if hasCursor {
+		cursor := fmt.Sprintf("(%s gt %s or (%s eq %s and %s gt '%s'))",
+			modRef,
+			cursorMod.UTC().Format(time.RFC3339),
+			modRef,
+			cursorMod.UTC().Format(time.RFC3339),
+			pkRef,
+			escapeODataString(cursorID),
+		)
+		filter = filter + " and " + cursor
+	}
+	// On FileMaker servers tested, comma-separated $select/$orderby works when each
+	// field name is wrapped in double quotes.
+	// Stable pagination requires ordering by both modification field and primary key.
+	ord := quoteSelectField(modField) + "%20asc," + quoteSelectField(pkField) + "%20asc"
 	q := "$filter=" + encodeSpaces(filter) +
-		"&$orderby=" + encodeSpaces(ord) +
+		"&$orderby=" + ord +
 		"&$select=" + quoteSelectField(pkField) + "," + quoteSelectField(modField) +
 		fmt.Sprintf("&$top=%d", top)
-	if skip > 0 {
-		q += fmt.Sprintf("&$skip=%d", skip)
-	}
 	return JoinPath(base, url.PathEscape(entitySet)) + "?" + q, nil
 }
 
 // encodeSpaces only — FileMaker rejects comma-encoding in $select/$orderby (see live tests).
 func encodeSpaces(s string) string {
-	return strings.ReplaceAll(s, " ", "%20")
+	s = strings.ReplaceAll(s, " ", "%20")
+	// Cursor filters compare string PK values (id gt '...'); encode literal quote marks.
+	s = strings.ReplaceAll(s, "'", "%27")
+	return s
 }
 
 func quoteSelectField(field string) string {
 	return "%22" + encodeSpaces(field) + "%22"
+}
+
+func quoteFilterField(field string) string {
+	return quoteSelectField(field)
+}
+
+func escapeODataString(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+func manifestCursor(rows []map[string]any, pkField, modField string) (string, time.Time, bool, error) {
+	for i := len(rows) - 1; i >= 0; i-- {
+		idv, ok := rows[i][pkField]
+		if !ok {
+			continue
+		}
+		id, ok := idv.(string)
+		if !ok || strings.TrimSpace(id) == "" {
+			continue
+		}
+		modv, ok := rows[i][modField]
+		if !ok {
+			continue
+		}
+		mod, err := parseODataTime(modv)
+		if err != nil {
+			continue
+		}
+		return id, mod, true, nil
+	}
+	return "", time.Time{}, false, fmt.Errorf("manifest page missing cursor fields %q/%q", pkField, modField)
 }
 
 func parseODataTime(v any) (time.Time, error) {

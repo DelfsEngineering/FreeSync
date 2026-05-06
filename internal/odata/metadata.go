@@ -128,8 +128,14 @@ func parseEntityProperties(xmlData []byte, entitySet string) ([]PropertySpec, er
 			case "Annotation":
 				if curProp != nil {
 					term := xmlAttr(t, "Term")
-					if isComputedAnnotationTerm(term) && xmlAttr(t, "Bool") == "true" {
-						curProp.Computed = true
+					if isComputedAnnotationTerm(term) {
+						boolAttr := strings.TrimSpace(xmlAttr(t, "Bool"))
+						// For FileMaker terms like *.Calculation and *.Summary, presence of the
+						// annotation itself implies computed/non-writable semantics even when Bool
+						// is omitted in metadata.
+						if boolAttr == "" || boolAttr == "true" {
+							curProp.Computed = true
+						}
 					}
 				}
 			}

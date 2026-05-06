@@ -39,3 +39,22 @@ func TestAuthorized(t *testing.T) {
 		t.Fatal("expected missing token to fail")
 	}
 }
+
+func TestNormalizeOneWay(t *testing.T) {
+	got, err := normalizeOneWay("TO-BLUE")
+	if err != nil {
+		t.Fatalf("normalize one-way returned error: %v", err)
+	}
+	if got != "to-blue" {
+		t.Fatalf("got %q want to-blue", got)
+	}
+
+	got, err = normalizeOneWay("")
+	if err != nil || got != "" {
+		t.Fatalf("expected empty mode, got mode=%q err=%v", got, err)
+	}
+
+	if _, err := normalizeOneWay("left"); err == nil {
+		t.Fatal("expected invalid mode to error")
+	}
+}

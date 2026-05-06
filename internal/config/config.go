@@ -34,6 +34,7 @@ type TableSpec struct {
 	PrimaryKey     string   `json:"primaryKey"`
 	ModifiedField  string   `json:"modifiedField"`
 	FieldOverrides []string `json:"fieldOverrides"` // optional: extra fields to sync (e.g. calculated) in addition to non-calculated intersection fields
+	IgnoreFields   []string `json:"ignoreFields"`   // optional: local/generated fields to exclude from writes and verification
 }
 
 type Defaults struct {

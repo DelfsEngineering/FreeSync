@@ -5,10 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
+	"math/rand"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,9 +26,20 @@ import (
 	"github.com/DelfsEngineering/FreeSync/internal/timespec"
 )
 
+var (
+	recordLockRetryMaxAttempts = 5
+	recordLockRetryBaseDelay   = 250 * time.Millisecond
+	recordLockRetryMaxDelay    = 3 * time.Second
+	recordReadRetryMaxAttempts = 3
+	recordReadRetryBaseDelay   = 200 * time.Millisecond
+	metadataRetryMaxAttempts   = 3
+	metadataRetryBaseDelay     = 300 * time.Millisecond
+)
+
 // Options controls a single run.
 type Options struct {
 	Apply     bool
+	OneWay    string // "", "to-blue", "to-green"
 	StatePath string
 	Logger    *log.Logger
 }
@@ -36,6 +52,11 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 		} else {
 			fmt.Printf(format+"\n", args...)
 		}
+	}
+
+	mode, err := normalizeOneWayMode(opt.OneWay)
+	if err != nil {
+		return err
 	}
 
 	blueSrv, greenSrv, err := cfg.BlueGreen()
@@ -154,8 +175,13 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 		}
 		logf("table %s: manifest rows blue=%d green=%d", tbl.Name, len(mBlue), len(mGreen))
 
-		plan := domain.BuildPlan(mBlue, mGreen, nil)
-		logf("table %s: plan ops=%d", tbl.Name, len(plan))
+		planAll := domain.BuildPlan(mBlue, mGreen, nil)
+		plan := filterPlanOneWay(planAll, mode)
+		if mode == "" {
+			logf("table %s: plan ops=%d", tbl.Name, len(plan))
+		} else {
+			logf("table %s: plan ops=%d (oneWay=%s filtered=%d)", tbl.Name, len(plan), mode, len(planAll)-len(plan))
+		}
 		for _, op := range plan {
 			logf("  %s %s", op.Kind, op.RecordID)
 		}
@@ -173,19 +199,20 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 			continue
 		}
 
-		blueProps, err := odata.EntityProperties(ctx, blueClient, tbl.Name)
+		blueProps, err := entityPropertiesWithRetry(ctx, blueClient, tbl.Name, logf)
 		if err != nil {
 			return fmt.Errorf("%s blue metadata: %w", tbl.Name, err)
 		}
-		greenProps, err := odata.EntityProperties(ctx, greenClient, tbl.Name)
+		greenProps, err := entityPropertiesWithRetry(ctx, greenClient, tbl.Name, logf)
 		if err != nil {
 			return fmt.Errorf("%s green metadata: %w", tbl.Name, err)
 		}
-		allowed := buildSyncFieldAllowlist(blueProps, greenProps, tbl.FieldOverrides, pk, mod)
+		allowed := buildSyncFieldAllowlist(blueProps, greenProps, tbl.FieldOverrides, tbl.IgnoreFields, pk, mod)
 		if len(allowed) == 0 {
 			return fmt.Errorf("%s: no sync fields after metadata + overrides", tbl.Name)
 		}
 
+		var deferred []deferredIssue
 		if opt.Apply && len(plan) > 0 {
 			batchSize := cfg.ApplyBatchSize()
 			maxWorkers := cfg.ApplyWorkers()
@@ -198,8 +225,19 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 				}
 				chunk := plan[i:end]
 				logf("table %s: apply batch %d/%d ops=%d", tbl.Name, bi+1, totalBatches, len(chunk))
-				if err := applyPlan(ctx, blueClient, greenClient, tbl.Name, chunk, allowed, mod, maxWorkers, i, len(plan), logf); err != nil {
+				batchDeferred, err := applyPlan(ctx, blueClient, greenClient, tbl.Name, chunk, allowed, pk, mod, maxWorkers, i, len(plan), logf)
+				if err != nil {
 					return fmt.Errorf("%s apply batch %d: %w", tbl.Name, bi+1, err)
+				}
+				deferred = append(deferred, batchDeferred...)
+			}
+			if len(deferred) > 0 {
+				logf("table %s: deferred %d ops for later retry (continuing run)", tbl.Name, len(deferred))
+				for i := 0; i < len(deferred) && i < 10; i++ {
+					logf("table %s: deferred %s %s reason=%s", tbl.Name, deferred[i].Kind, deferred[i].RecordID, deferred[i].Reason)
+				}
+				if err := appendDeferredIssues(opt.StatePath, tbl.Name, deferred); err != nil {
+					logf("table %s: warning: could not persist deferred issues: %v", tbl.Name, err)
 				}
 			}
 		}
@@ -211,7 +249,7 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 			endThrough = time.Now().UTC()
 		}
 
-		if cfg.VerifyStrict() {
+		if cfg.VerifyStrict() && len(deferred) == 0 {
 			// Verify: re-fetch manifests; expect empty plan.
 			var mBlue2 map[string]time.Time
 			logf("table %s: verify fetch blue manifest...", tbl.Name)
@@ -237,15 +275,20 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 			if err != nil {
 				return fmt.Errorf("%s verify green: %w", tbl.Name, err)
 			}
-			plan2 := domain.BuildPlan(mBlue2, mGreen2, nil)
+			plan2All := domain.BuildPlan(mBlue2, mGreen2, nil)
+			plan2 := filterPlanOneWay(plan2All, mode)
 			if len(plan2) > 0 {
 				// FileMaker bumps ModificationTimestamp on each write; pure LWW on timestamps may
 				// still suggest copy ops even when replicated fields already match — confirm payload equality.
-				if err := verifyReplicaFields(ctx, blueClient, greenClient, tbl.Name, plan2, allowed, mod); err != nil {
+				if err := verifyReplicaFields(ctx, blueClient, greenClient, tbl.Name, plan2, allowed, pk, mod); err != nil {
 					return fmt.Errorf("%s verify failed (%d pending time-order ops): %w", tbl.Name, len(plan2), err)
 				}
 				logf("table %s: verify ok (%d time-order ops ignored — replicated fields match)", tbl.Name, len(plan2))
+			} else if mode != "" && len(plan2All) > 0 {
+				logf("table %s: verify ok (oneWay=%s filtered %d opposite-direction ops)", tbl.Name, mode, len(plan2All))
 			}
+		} else if cfg.VerifyStrict() && len(deferred) > 0 {
+			logf("table %s: verify skipped (deferredOps=%d)", tbl.Name, len(deferred))
 		} else {
 			logf("table %s: verify skipped (verifyMode=off)", tbl.Name)
 		}
@@ -258,14 +301,51 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 	return nil
 }
 
+func normalizeOneWayMode(mode string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "":
+		return "", nil
+	case "to-blue", "to-green":
+		return strings.TrimSpace(strings.ToLower(mode)), nil
+	default:
+		return "", fmt.Errorf("invalid oneWay %q (expected: to-blue, to-green)", mode)
+	}
+}
+
+func filterPlanOneWay(plan []domain.Op, mode string) []domain.Op {
+	if mode == "" {
+		return plan
+	}
+	out := make([]domain.Op, 0, len(plan))
+	for _, op := range plan {
+		switch mode {
+		case "to-blue":
+			if op.Kind == domain.CopyToBlue || op.Kind == domain.DeleteFromBlue {
+				out = append(out, op)
+			}
+		case "to-green":
+			if op.Kind == domain.CopyToGreen || op.Kind == domain.DeleteFromGreen {
+				out = append(out, op)
+			}
+		}
+	}
+	return out
+}
+
 // buildSyncFieldAllowlist keeps fields present on both sides where neither OData metadata marks
 // the property as Computed, plus any name listed in overrides (for calculated fields you still
 // want to push). Primary key and modification field are always included.
-func buildSyncFieldAllowlist(blue, green []odata.PropertySpec, overrides []string, pk, mod string) map[string]struct{} {
+func buildSyncFieldAllowlist(blue, green []odata.PropertySpec, overrides, ignored []string, pk, mod string) map[string]struct{} {
 	override := make(map[string]struct{}, len(overrides))
 	for _, f := range overrides {
 		if f != "" {
 			override[f] = struct{}{}
+		}
+	}
+	ignore := make(map[string]struct{}, len(ignored))
+	for _, f := range ignored {
+		if f != "" {
+			ignore[f] = struct{}{}
 		}
 	}
 	bm := make(map[string]odata.PropertySpec, len(blue))
@@ -278,6 +358,9 @@ func buildSyncFieldAllowlist(blue, green []odata.PropertySpec, overrides []strin
 	}
 	out := make(map[string]struct{})
 	for name, bp := range bm {
+		if _, skip := ignore[name]; skip {
+			continue
+		}
 		gp, ok := gm[name]
 		if !ok {
 			continue
@@ -309,17 +392,27 @@ func filterRecord(rec map[string]any, allowed map[string]struct{}) map[string]an
 	return out
 }
 
-func verifyReplicaFields(ctx context.Context, blue, green *odata.Client, entity string, plan []domain.Op, allowed map[string]struct{}, modField string) error {
+func fieldsFromAllowlist(allowed map[string]struct{}) []string {
+	fields := make([]string, 0, len(allowed))
+	for f := range allowed {
+		fields = append(fields, f)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+func verifyReplicaFields(ctx context.Context, blue, green *odata.Client, entity string, plan []domain.Op, allowed map[string]struct{}, pkField, modField string) error {
+	selectedFields := fieldsFromAllowlist(allowed)
 	ids := make(map[string]struct{})
 	for _, op := range plan {
 		ids[op.RecordID] = struct{}{}
 	}
 	for id := range ids {
-		bRec, err := odata.GetRecord(ctx, blue, entity, id)
+		bRec, _, err := getRecordForID(ctx, blue, entity, pkField, id, selectedFields, nil)
 		if err != nil {
 			return fmt.Errorf("get blue %s: %w", id, err)
 		}
-		gRec, err := odata.GetRecord(ctx, green, entity, id)
+		gRec, _, err := getRecordForID(ctx, green, entity, pkField, id, selectedFields, nil)
 		if err != nil {
 			return fmt.Errorf("get green %s: %w", id, err)
 		}
@@ -433,7 +526,13 @@ func withHeartbeat(ctx context.Context, every time.Duration, logf func(format st
 	return err
 }
 
-func applyPlan(ctx context.Context, blue, green *odata.Client, entity string, plan []domain.Op, allowed map[string]struct{}, modField string, maxWorkers, progressBase, progressTotal int, logf func(string, ...any)) error {
+type deferredIssue struct {
+	RecordID string `json:"recordId"`
+	Kind     string `json:"kind"`
+	Reason   string `json:"reason"`
+}
+
+func applyPlan(ctx context.Context, blue, green *odata.Client, entity string, plan []domain.Op, allowed map[string]struct{}, pkField, modField string, maxWorkers, progressBase, progressTotal int, logf func(string, ...any)) ([]deferredIssue, error) {
 	if maxWorkers <= 0 {
 		maxWorkers = 1
 	}
@@ -446,42 +545,65 @@ func applyPlan(ctx context.Context, blue, green *odata.Client, entity string, pl
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
 	var doneCount int64
+	var deferred []deferredIssue
+	var deferredMu sync.Mutex
+	selectedFields := fieldsFromAllowlist(allowed)
 
 	work := func(op domain.Op) error {
 		switch op.Kind {
 		case domain.CopyToGreen:
-			rec, err := odata.GetRecord(workerCtx, blue, entity, op.RecordID)
+			rec, _, err := getRecordForID(workerCtx, blue, entity, pkField, op.RecordID, selectedFields, logf)
 			if err != nil {
+				if errors.Is(err, odata.ErrNotFound) {
+					if logf != nil {
+						logf("table %s: source record disappeared on blue (%s), skipping op", entity, op.RecordID)
+					}
+					return nil
+				}
 				return fmt.Errorf("get blue %s: %w", op.RecordID, err)
 			}
 			odata.StripMetadata(rec)
 			rec = filterRecord(rec, allowed)
 			body := maps.Clone(rec)
 			delete(body, modField)
-			err = odata.PatchRecord(workerCtx, green, entity, op.RecordID, body)
+			err = patchRecordForID(workerCtx, green, entity, pkField, op, "patch green", body, logf)
 			switch {
 			case err == nil:
-			case odata.IsHTTPStatus(err, http.StatusNotFound):
-				if err := odata.PostRecord(workerCtx, green, entity, rec); err != nil {
+			case isRecordLockExhausted(err):
+				return err
+			case errors.Is(err, odata.ErrNotFound):
+				if err := retryRecordLock(workerCtx, entity, op, "post green", logf, func() error {
+					return odata.PostRecord(workerCtx, green, entity, rec)
+				}); err != nil {
 					return fmt.Errorf("post green %s: %w", op.RecordID, err)
 				}
 			default:
 				return fmt.Errorf("patch green %s: %w", op.RecordID, err)
 			}
 		case domain.CopyToBlue:
-			rec, err := odata.GetRecord(workerCtx, green, entity, op.RecordID)
+			rec, _, err := getRecordForID(workerCtx, green, entity, pkField, op.RecordID, selectedFields, logf)
 			if err != nil {
+				if errors.Is(err, odata.ErrNotFound) {
+					if logf != nil {
+						logf("table %s: source record disappeared on green (%s), skipping op", entity, op.RecordID)
+					}
+					return nil
+				}
 				return fmt.Errorf("get green %s: %w", op.RecordID, err)
 			}
 			odata.StripMetadata(rec)
 			rec = filterRecord(rec, allowed)
 			body := maps.Clone(rec)
 			delete(body, modField)
-			err = odata.PatchRecord(workerCtx, blue, entity, op.RecordID, body)
+			err = patchRecordForID(workerCtx, blue, entity, pkField, op, "patch blue", body, logf)
 			switch {
 			case err == nil:
-			case odata.IsHTTPStatus(err, http.StatusNotFound):
-				if err := odata.PostRecord(workerCtx, blue, entity, rec); err != nil {
+			case isRecordLockExhausted(err):
+				return err
+			case errors.Is(err, odata.ErrNotFound):
+				if err := retryRecordLock(workerCtx, entity, op, "post blue", logf, func() error {
+					return odata.PostRecord(workerCtx, blue, entity, rec)
+				}); err != nil {
 					return fmt.Errorf("post blue %s: %w", op.RecordID, err)
 				}
 			default:
@@ -499,6 +621,38 @@ func applyPlan(ctx context.Context, blue, green *odata.Client, entity string, pl
 			defer wg.Done()
 			for j := range jobs {
 				if err := work(j.op); err != nil {
+					if isRecordLockExhausted(err) {
+						deferredMu.Lock()
+						deferred = append(deferred, deferredIssue{RecordID: j.op.RecordID, Kind: j.op.Kind.String(), Reason: "record_lock"})
+						deferredMu.Unlock()
+						if logf != nil {
+							logf("table %s: unresolved record lock after retries (%s %s)", entity, j.op.Kind, j.op.RecordID)
+						}
+						cur := int(atomic.AddInt64(&doneCount, 1))
+						if logf != nil {
+							totalDone := progressBase + cur
+							if totalDone%100 == 0 || cur == len(plan) {
+								logf("table %s: apply progress %d/%d", entity, totalDone, progressTotal)
+							}
+						}
+						continue
+					}
+					if isRecordReadExhausted(err) {
+						deferredMu.Lock()
+						deferred = append(deferred, deferredIssue{RecordID: j.op.RecordID, Kind: j.op.Kind.String(), Reason: "source_read"})
+						deferredMu.Unlock()
+						if logf != nil {
+							logf("table %s: unresolved source read after retries (%s %s)", entity, j.op.Kind, j.op.RecordID)
+						}
+						cur := int(atomic.AddInt64(&doneCount, 1))
+						if logf != nil {
+							totalDone := progressBase + cur
+							if totalDone%100 == 0 || cur == len(plan) {
+								logf("table %s: apply progress %d/%d", entity, totalDone, progressTotal)
+							}
+						}
+						continue
+					}
 					select {
 					case errCh <- err:
 					default:
@@ -529,8 +683,361 @@ sendLoop:
 	wg.Wait()
 	select {
 	case err := <-errCh:
-		return err
+		return nil, err
 	default:
+		return deferred, nil
+	}
+}
+
+func appendDeferredIssues(statePath, table string, issues []deferredIssue) error {
+	if len(issues) == 0 {
 		return nil
 	}
+	dir := filepath.Dir(statePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := statePath + ".deferred.jsonl"
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, iss := range issues {
+		row := map[string]any{
+			"ts":       time.Now().UTC().Format(time.RFC3339Nano),
+			"table":    table,
+			"recordId": iss.RecordID,
+			"kind":     iss.Kind,
+			"reason":   iss.Reason,
+		}
+		if err := enc.Encode(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type recordLockExhaustedError struct {
+	Entity    string
+	Op        domain.Op
+	Attempt   int
+	LastErr   error
+	Operation string
+}
+
+func (e *recordLockExhaustedError) Error() string {
+	return fmt.Sprintf("%s %s %s: lock persisted after %d attempts: %v", e.Entity, e.Op.Kind, e.Op.RecordID, e.Attempt, e.LastErr)
+}
+
+func isRecordLockExhausted(err error) bool {
+	var re *recordLockExhaustedError
+	return errors.As(err, &re)
+}
+
+func retryRecordLock(ctx context.Context, entity string, op domain.Op, operation string, logf func(string, ...any), fn func() error) error {
+	maxAttempts := recordLockRetryMaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	base := recordLockRetryBaseDelay
+	if base <= 0 {
+		base = 250 * time.Millisecond
+	}
+	maxDelay := recordLockRetryMaxDelay
+	if maxDelay <= 0 {
+		maxDelay = 3 * time.Second
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if !isRecordLockedError(err) {
+			return err
+		}
+		lastErr = err
+		if attempt == maxAttempts {
+			return &recordLockExhaustedError{
+				Entity:    entity,
+				Op:        op,
+				Attempt:   attempt,
+				LastErr:   err,
+				Operation: operation,
+			}
+		}
+		wait := backoffWithJitter(base, maxDelay, attempt)
+		if logf != nil {
+			logf("table %s: record lock on %s %s (%s), retry %d/%d in %s", entity, op.Kind, op.RecordID, operation, attempt, maxAttempts, wait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return lastErr
+}
+
+func backoffWithJitter(base, max time.Duration, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := base
+	for i := 1; i < attempt; i++ {
+		d *= 2
+		if d >= max {
+			d = max
+			break
+		}
+	}
+	// jitter in [0.8x, 1.2x]
+	jitter := 0.8 + (rand.Float64() * 0.4)
+	out := time.Duration(float64(d) * jitter)
+	if out > max {
+		return max
+	}
+	if out < 10*time.Millisecond {
+		return 10 * time.Millisecond
+	}
+	return out
+}
+
+func isRecordLockedError(err error) bool {
+	var hs *odata.HTTPStatusError
+	if !errors.As(err, &hs) {
+		return false
+	}
+	body := strings.ToLower(hs.Body)
+	if strings.Contains(body, `"code": "301"`) || strings.Contains(body, "record is locked") {
+		return true
+	}
+	if strings.Contains(body, "(301): record is locked") {
+		return true
+	}
+	return false
+}
+
+type recordReadExhaustedError struct {
+	Entity  string
+	Record  string
+	Attempt int
+	LastErr error
+}
+
+func (e *recordReadExhaustedError) Error() string {
+	return fmt.Sprintf("%s %s: source read failed after %d attempts: %v", e.Entity, e.Record, e.Attempt, e.LastErr)
+}
+
+func isRecordReadExhausted(err error) bool {
+	var re *recordReadExhaustedError
+	return errors.As(err, &re)
+}
+
+func getRecordWithRetry(ctx context.Context, cli *odata.Client, entity, id string, selectedFields []string, logf func(string, ...any)) (map[string]any, error) {
+	maxAttempts := recordReadRetryMaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	base := recordReadRetryBaseDelay
+	if base <= 0 {
+		base = 200 * time.Millisecond
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		rec, err := odata.GetRecordPathSelected(ctx, cli, odata.RecordPath(entity, id), selectedFields)
+		if err == nil {
+			return rec, nil
+		}
+		if errors.Is(err, odata.ErrNotFound) {
+			return nil, err
+		}
+		lastErr = err
+		if !isTransientRecordReadError(err) {
+			return nil, err
+		}
+		if attempt == maxAttempts {
+			return nil, &recordReadExhaustedError{
+				Entity:  entity,
+				Record:  id,
+				Attempt: attempt,
+				LastErr: err,
+			}
+		}
+		wait := time.Duration(attempt) * base
+		if logf != nil {
+			logf("table %s: transient source read error for %s, retry %d/%d in %s (%v)", entity, id, attempt, maxAttempts, wait, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil, lastErr
+}
+
+func isTransientRecordReadError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "invalid character") || strings.Contains(msg, "decode") {
+		return true
+	}
+	if strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "client.timeout") || strings.Contains(msg, "timeout") {
+		return true
+	}
+	if strings.Contains(msg, "stream error") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "eof") || strings.Contains(msg, "received from peer") {
+		return true
+	}
+	return false
+}
+
+func getRecordForID(ctx context.Context, cli *odata.Client, entity, pkField, id string, selectedFields []string, logf func(string, ...any)) (map[string]any, string, error) {
+	rec, err := getRecordWithRetry(ctx, cli, entity, id, selectedFields, logf)
+	if err == nil {
+		return rec, odata.RecordPath(entity, id), nil
+	}
+	if !(errors.Is(err, odata.ErrNotFound) || isRecordKeyMismatchError(err)) {
+		return nil, "", err
+	}
+	rec, recordPath, err := getRecordByPKWithRetry(ctx, cli, entity, pkField, id, selectedFields, logf)
+	if err != nil {
+		return nil, "", err
+	}
+	if recordPath == "" {
+		recordPath = odata.RecordPath(entity, id)
+	}
+	return rec, recordPath, nil
+}
+
+func getRecordByPKWithRetry(ctx context.Context, cli *odata.Client, entity, pkField, id string, selectedFields []string, logf func(string, ...any)) (map[string]any, string, error) {
+	maxAttempts := recordReadRetryMaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	base := recordReadRetryBaseDelay
+	if base <= 0 {
+		base = 200 * time.Millisecond
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		rec, recordPath, err := odata.GetRecordByPKSelected(ctx, cli, entity, pkField, id, selectedFields)
+		if err == nil {
+			return rec, recordPath, nil
+		}
+		if errors.Is(err, odata.ErrNotFound) {
+			return nil, "", err
+		}
+		lastErr = err
+		if !isTransientRecordReadError(err) {
+			return nil, "", err
+		}
+		if attempt == maxAttempts {
+			return nil, "", &recordReadExhaustedError{
+				Entity:  entity,
+				Record:  id,
+				Attempt: attempt,
+				LastErr: err,
+			}
+		}
+		wait := time.Duration(attempt) * base
+		if logf != nil {
+			logf("table %s: transient source read error for %s (pk lookup), retry %d/%d in %s (%v)", entity, id, attempt, maxAttempts, wait, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil, "", lastErr
+}
+
+func patchRecordForID(ctx context.Context, dst *odata.Client, entity, pkField string, op domain.Op, operation string, body map[string]any, logf func(string, ...any)) error {
+	defaultPath := odata.RecordPath(entity, op.RecordID)
+	err := retryRecordLock(ctx, entity, op, operation, logf, func() error {
+		return odata.PatchRecordPath(ctx, dst, defaultPath, body)
+	})
+	switch {
+	case err == nil:
+		return nil
+	case isRecordLockExhausted(err):
+		return err
+	case odata.IsHTTPStatus(err, http.StatusNotFound):
+		return odata.ErrNotFound
+	case !isRecordKeyMismatchError(err):
+		return err
+	}
+
+	_, resolvedPath, lookupErr := getRecordByPKWithRetry(ctx, dst, entity, pkField, op.RecordID, []string{pkField}, logf)
+	if lookupErr != nil {
+		if errors.Is(lookupErr, odata.ErrNotFound) {
+			return odata.ErrNotFound
+		}
+		return lookupErr
+	}
+	if resolvedPath == "" || resolvedPath == defaultPath {
+		return err
+	}
+	err = retryRecordLock(ctx, entity, op, operation+" (resolved key)", logf, func() error {
+		return odata.PatchRecordPath(ctx, dst, resolvedPath, body)
+	})
+	if odata.IsHTTPStatus(err, http.StatusNotFound) {
+		return odata.ErrNotFound
+	}
+	return err
+}
+
+func isRecordKeyMismatchError(err error) bool {
+	var hs *odata.HTTPStatusError
+	if !errors.As(err, &hs) {
+		return false
+	}
+	if hs.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	body := strings.ToLower(hs.Body)
+	return strings.Contains(body, "incompatible data types") || strings.Contains(body, `"code":"8309"`) || strings.Contains(body, `"code": "8309"`)
+}
+
+func entityPropertiesWithRetry(ctx context.Context, cli *odata.Client, entity string, logf func(string, ...any)) ([]odata.PropertySpec, error) {
+	maxAttempts := metadataRetryMaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	base := metadataRetryBaseDelay
+	if base <= 0 {
+		base = 300 * time.Millisecond
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		props, err := odata.EntityProperties(ctx, cli, entity)
+		if err == nil {
+			return props, nil
+		}
+		lastErr = err
+		if !isTransientMetadataError(err) || attempt == maxAttempts {
+			return nil, err
+		}
+		wait := time.Duration(attempt) * base
+		if logf != nil {
+			logf("table %s: metadata transient error, retry %d/%d in %s (%v)", entity, attempt, maxAttempts, wait, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil, lastErr
+}
+
+func isTransientMetadataError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "client.timeout") || strings.Contains(msg, "timeout") {
+		return true
+	}
+	return false
 }
