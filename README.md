@@ -4,11 +4,22 @@ Goal: keep **two FileMaker files** (“blue” / “green”) **mirrored**—sam
 
 Bidirectional **OData** sync runs in one process. Changes are driven by `ModificationTimestamp` and a small JSON checkpoint—not full-table pulls.
 
+## Features
+
+- Bidirectional or one-way FileMaker OData sync (`to-blue` / `to-green`).
+- Multithreaded apply workers with bounded concurrency, plus parallel blue/green manifest and schema reads.
+- Automatic sync-field filtering from FileMaker schema: skips calculated, summary, missing, and explicitly ignored local-generated fields.
+- Stable keyset pagination over modification windows, avoiding offset drift during live writes.
+- Safe checkpoint windows with configurable overlap so repeated runs only recheck recent changes.
+- Per-record retry/defer handling for transient FileMaker locks, network issues, and malformed record reads.
+- Docker/Kubernetes-ready HTTP service with bearer-token trigger endpoint and concise operational logs.
+
 ## Getting Started
 
 Requirements:
 
-- Go **1.22+**
+- **Docker** for the preferred run/deploy path. The image build includes Go and produces the `freesync` binary.
+- Go **1.22+** only if you want to run tests or build from source without Docker.
 - A valid FileMaker OData config (see setup below)
 
 1) Copy and edit config:
