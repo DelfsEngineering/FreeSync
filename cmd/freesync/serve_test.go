@@ -12,7 +12,7 @@ import (
 )
 
 func TestServeHandler_Healthz(t *testing.T) {
-	h := newServerHandler("cfg.json", "state.json", "", true, "", log.New(io.Discard, "", 0), func(context.Context, string, string, bool, string, *log.Logger) error {
+	h := newServerHandler("cfg.json", "state.json", "", true, "", false, log.New(io.Discard, "", 0), func(context.Context, string, string, bool, string, bool, *log.Logger) error {
 		return nil
 	})
 	srv := httptest.NewServer(h)
@@ -29,7 +29,7 @@ func TestServeHandler_Healthz(t *testing.T) {
 }
 
 func TestServeHandler_RunUnauthorized(t *testing.T) {
-	h := newServerHandler("cfg.json", "state.json", "secret", true, "", log.New(io.Discard, "", 0), func(context.Context, string, string, bool, string, *log.Logger) error {
+	h := newServerHandler("cfg.json", "state.json", "secret", true, "", false, log.New(io.Discard, "", 0), func(context.Context, string, string, bool, string, bool, *log.Logger) error {
 		t.Fatal("runner should not be called when unauthorized")
 		return nil
 	})
@@ -49,7 +49,7 @@ func TestServeHandler_RunUnauthorized(t *testing.T) {
 
 func TestServeHandler_RunApplyOverride(t *testing.T) {
 	var calledApply bool
-	h := newServerHandler("cfg.json", "state.json", "", true, "", log.New(io.Discard, "", 0), func(_ context.Context, _, _ string, apply bool, _ string, _ *log.Logger) error {
+	h := newServerHandler("cfg.json", "state.json", "", true, "", false, log.New(io.Discard, "", 0), func(_ context.Context, _, _ string, apply bool, _ string, _ bool, _ *log.Logger) error {
 		calledApply = apply
 		return nil
 	})
@@ -73,7 +73,7 @@ func TestServeHandler_RunApplyOverride(t *testing.T) {
 func TestServeHandler_RunConflict(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	h := newServerHandler("cfg.json", "state.json", "", true, "", log.New(io.Discard, "", 0), func(_ context.Context, _, _ string, _ bool, _ string, _ *log.Logger) error {
+	h := newServerHandler("cfg.json", "state.json", "", true, "", false, log.New(io.Discard, "", 0), func(_ context.Context, _, _ string, _ bool, _ string, _ bool, _ *log.Logger) error {
 		started <- struct{}{}
 		<-release
 		return nil
@@ -113,7 +113,7 @@ func TestServeHandler_RunConflict(t *testing.T) {
 }
 
 func TestServeHandler_RunReturnsErrorJSON(t *testing.T) {
-	h := newServerHandler("cfg.json", "state.json", "", true, "", log.New(io.Discard, "", 0), func(context.Context, string, string, bool, string, *log.Logger) error {
+	h := newServerHandler("cfg.json", "state.json", "", true, "", false, log.New(io.Discard, "", 0), func(context.Context, string, string, bool, string, bool, *log.Logger) error {
 		return context.DeadlineExceeded
 	})
 	srv := httptest.NewServer(h)
@@ -142,7 +142,7 @@ func TestServeHandler_RunReturnsErrorJSON(t *testing.T) {
 
 func TestServeHandler_RunOneWayOverride(t *testing.T) {
 	var calledOneWay string
-	h := newServerHandler("cfg.json", "state.json", "", true, "to-blue", log.New(io.Discard, "", 0), func(_ context.Context, _, _ string, _ bool, oneWay string, _ *log.Logger) error {
+	h := newServerHandler("cfg.json", "state.json", "", true, "to-blue", false, log.New(io.Discard, "", 0), func(_ context.Context, _, _ string, _ bool, oneWay string, _ bool, _ *log.Logger) error {
 		calledOneWay = oneWay
 		return nil
 	})
@@ -160,5 +160,28 @@ func TestServeHandler_RunOneWayOverride(t *testing.T) {
 	}
 	if calledOneWay != "to-green" {
 		t.Fatalf("expected oneWay override, got %q", calledOneWay)
+	}
+}
+
+func TestServeHandler_RunVerboseOverride(t *testing.T) {
+	var calledVerbose bool
+	h := newServerHandler("cfg.json", "state.json", "", true, "", false, log.New(io.Discard, "", 0), func(_ context.Context, _, _ string, _ bool, _ string, verbose bool, _ *log.Logger) error {
+		calledVerbose = verbose
+		return nil
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/run?verbose=true", nil)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", res.StatusCode)
+	}
+	if !calledVerbose {
+		t.Fatal("expected verbose override")
 	}
 }

@@ -53,6 +53,8 @@ Use OData standard query options on entity sets (see guide sections **Query opti
 ## Metadata
 
 - [Get metadata](https://help.claris.com/en/odata-guide/content/get-metadata.html) — discover entity set names and property types for each table.
+- Free Sync prefers the thinner `FileMaker_Fields` system table for writable-field discovery during normal sync runs. For each configured table it reads `TableName`, `FieldName`, `FieldType`, `FieldClass`, `FieldReps`, `FieldId`, and `ModCount`; `FieldClass=Normal` is treated as a writable candidate and calculated/summary fields are excluded.
+- Full `$metadata` remains a fallback when `FileMaker_Fields` is unavailable or incomplete. This avoids repeatedly downloading the full database XML schema, which can be hundreds of KB and slow on live FileMaker Server.
 
 ## Security note for repositories
 

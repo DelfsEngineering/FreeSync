@@ -48,7 +48,7 @@ Writes are **dry-run by default** unless `-apply` is present.
 Run once:
 
 ```bash
-freesync run [-apply] [-one-way to-blue|to-green] [-config path] [-state path]
+freesync run [-apply] [-one-way to-blue|to-green] [-config path] [-state path] [-verbose]
 ```
 
 Examples:
@@ -56,6 +56,7 @@ Examples:
 ```bash
 freesync run -apply
 freesync run -apply -one-way to-blue
+freesync run -apply -one-way to-blue -verbose
 freesync -config ./config/dev.local.json run -apply
 go run ./cmd/freesync run -apply
 ```
@@ -83,6 +84,7 @@ curl -X POST http://localhost:8080/run \
 
 - `POST /run?apply=false` forces dry-run for that request.
 - `POST /run?oneWay=to-blue` forces one-way updates to blue only for that request.
+- `POST /run?verbose=true` includes page-level manifest/debug logs for that request.
 - If a run is already in progress, another `POST /run` returns `409`.
 
 ## Configuration
@@ -102,13 +104,14 @@ Environment (optional):
 | `FREESYNC_TRIGGER_TOKEN` | empty (no auth required if unset) |
 | `FREESYNC_LISTEN` | `:8080` (serve mode) |
 | `FREESYNC_ONE_WAY` | empty (bidirectional) |
+| `FREESYNC_VERBOSE` | `false` |
 
 Flags **`-config`** and **`-state`** set the same paths.
 
 ## Sync Rules
 
 - Tables are listed under **`tables`** in config; each needs **`name`**, **`primaryKey`**, **`modifiedField`** (or use **`defaults`**).
-- **Schema:** intersection of fields on both files. **`$metadata`** is used to skip **calculated** / **summary** / OData **Computed** properties when those annotations are present. Use per-table **`fieldOverrides`** to include a field that would otherwise be skipped.
+- **Schema:** intersection of fields on both files. Free Sync prefers the thin FileMaker `FileMaker_Fields` system table to skip calculated/summary fields; full **`$metadata`** remains a fallback. Use per-table **`fieldOverrides`** to include a field that would otherwise be skipped.
 - Use per-table **`ignoreFields`** for FileMaker-local generated fields (for example auto-enter URLs or cache/version fields). Ignored fields are excluded from PATCH bodies and strict verification, even if OData reports them as normal writable fields.
 - On first run without checkpoint: `bootstrapMode=binary` uses lightweight head probes and binary search to find a narrow bootstrap window; if probe fails, it falls back to fixed `initialLookback`.
 

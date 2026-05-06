@@ -40,6 +40,8 @@ spec:
                 secretKeyRef:
                   name: freesync-secret
                   key: triggerToken
+            - name: FREESYNC_VERBOSE
+              value: "false"
           ports:
             - containerPort: 8080
           volumeMounts:
@@ -82,8 +84,16 @@ curl -X POST "http://freesync.default.svc.cluster.local:8080/run?apply=false" \
   -H "Authorization: Bearer ${FREESYNC_TRIGGER_TOKEN}"
 ```
 
+Verbose one-off trigger for debugging page-level manifest/schema detail:
+
+```bash
+curl -X POST "http://freesync.default.svc.cluster.local:8080/run?verbose=true" \
+  -H "Authorization: Bearer ${FREESYNC_TRIGGER_TOKEN}"
+```
+
 ## Notes
 
 - Keep deployment replica count at `1` unless you externalize/lock state.
 - Persist `FREESYNC_STATE` on a PVC so checkpoints survive restarts.
 - Use network policy / ingress auth in addition to bearer token.
+- Keep `FREESYNC_VERBOSE=false` for normal operations. Default logs show concise table summaries and record IDs being synced; use `verbose=true` only when debugging.

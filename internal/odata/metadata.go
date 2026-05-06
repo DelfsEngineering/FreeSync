@@ -3,9 +3,11 @@ package odata
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 )
 
@@ -13,6 +15,17 @@ import (
 type PropertySpec struct {
 	Name     string
 	Computed bool // Org.OData.Core.V1.Computed or equivalent annotation
+}
+
+// FileMakerFieldSpec is a thin schema row from FileMaker_Fields.
+type FileMakerFieldSpec struct {
+	TableName  string `json:"TableName"`
+	FieldName  string `json:"FieldName"`
+	FieldType  string `json:"FieldType"`
+	FieldClass string `json:"FieldClass"`
+	FieldReps  int    `json:"FieldReps"`
+	FieldID    int    `json:"FieldId"`
+	ModCount   int    `json:"ModCount"`
 }
 
 // GetBytes performs GET and returns the raw body and HTTP status (any Accept).
@@ -49,6 +62,86 @@ func EntityProperties(ctx context.Context, cli *Client, entitySet string) ([]Pro
 		return nil, fmt.Errorf("parse metadata: %w", err)
 	}
 	return props, nil
+}
+
+// EntityPropertiesPreferThinSchema returns scalar property metadata using FileMaker_Fields first.
+// It falls back to full $metadata when FileMaker_Fields is unavailable or incomplete.
+func EntityPropertiesPreferThinSchema(ctx context.Context, cli *Client, entitySet string) ([]PropertySpec, string, error) {
+	props, err := EntityPropertiesFromFileMakerFields(ctx, cli, entitySet)
+	if err == nil {
+		return props, "filemaker_fields", nil
+	}
+	props, metaErr := EntityProperties(ctx, cli, entitySet)
+	if metaErr != nil {
+		return nil, "", fmt.Errorf("thin schema: %v; metadata fallback: %w", err, metaErr)
+	}
+	return props, "metadata", nil
+}
+
+// EntityPropertiesFromFileMakerFields reads the small FileMaker_Fields system table slice for one table.
+func EntityPropertiesFromFileMakerFields(ctx context.Context, cli *Client, entitySet string) ([]PropertySpec, error) {
+	rows, err := FileMakerFields(ctx, cli, entitySet)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("FileMaker_Fields: no rows for table %q", entitySet)
+	}
+	props := make([]PropertySpec, 0, len(rows))
+	for _, row := range rows {
+		if row.FieldName == "" {
+			continue
+		}
+		props = append(props, PropertySpec{
+			Name:     row.FieldName,
+			Computed: !isNormalFileMakerFieldClass(row.FieldClass),
+		})
+	}
+	if len(props) == 0 {
+		return nil, fmt.Errorf("FileMaker_Fields: no usable rows for table %q", entitySet)
+	}
+	return props, nil
+}
+
+// FileMakerFields fetches selected schema rows from FileMaker_Fields for one table.
+func FileMakerFields(ctx context.Context, cli *Client, tableName string) ([]FileMakerFieldSpec, error) {
+	filter := fmt.Sprintf("%s eq '%s'", quoteFilterField("TableName"), escapeODataString(tableName))
+	selects := []string{"TableName", "FieldName", "FieldType", "FieldClass", "FieldReps", "FieldId", "ModCount"}
+	q := "$filter=" + encodeSpaces(filter) +
+		"&$select=" + strings.Join(quoteSelectFields(selects), ",") +
+		"&$orderby=" + quoteSelectField("FieldName") +
+		"&$top=1000"
+	path := JoinPath(cli.BaseURL, "FileMaker_Fields") + "?" + q
+	b, code, err := cli.GetJSON(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if code == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if code >= 300 {
+		return nil, fmt.Errorf("FileMaker_Fields GET %d: %s", code, truncate(string(b), 300))
+	}
+	var envelope struct {
+		Value []FileMakerFieldSpec `json:"value"`
+	}
+	if err := json.Unmarshal(b, &envelope); err != nil {
+		return nil, err
+	}
+	return envelope.Value, nil
+}
+
+func quoteSelectFields(fields []string) []string {
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		out = append(out, quoteSelectField(f))
+	}
+	return out
+}
+
+func isNormalFileMakerFieldClass(class string) bool {
+	class = strings.TrimSpace(strings.ToLower(class))
+	return class == "" || class == "normal"
 }
 
 // parseEntityPropertyNames extracts Property Name values for the given entity set name.

@@ -41,6 +41,7 @@ type Options struct {
 	Apply     bool
 	OneWay    string // "", "to-blue", "to-green"
 	StatePath string
+	Verbose   bool
 	Logger    *log.Logger
 }
 
@@ -51,6 +52,11 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 			opt.Logger.Printf(format, args...)
 		} else {
 			fmt.Printf(format+"\n", args...)
+		}
+	}
+	debugf := func(format string, args ...any) {
+		if opt.Verbose {
+			logf(format, args...)
 		}
 	}
 
@@ -113,7 +119,7 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 		if !ok {
 			start := now.Add(-lookback)
 			if cfg.BootstrapBinary() {
-				logf("table %s: bootstrapMode=binary (lookback=%s maxLookback=%s)", tbl.Name, lookback, maxLookback)
+				debugf("table %s: bootstrapMode=binary (lookback=%s maxLookback=%s)", tbl.Name, lookback, maxLookback)
 				probe := func(ts time.Time) (bool, error) {
 					ctxProbe, cancel := context.WithTimeout(ctx, 45*time.Second)
 					defer cancel()
@@ -143,50 +149,23 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 				}
 			}
 			window = domain.SyncWindow{Start: start, End: now}
-			logf("table %s: bootstrap window [%s .. %s]", tbl.Name, window.Start.Format(time.RFC3339), window.End.Format(time.RFC3339))
+			debugf("table %s: bootstrap window [%s .. %s]", tbl.Name, window.Start.Format(time.RFC3339), window.End.Format(time.RFC3339))
 		} else {
 			window = domain.ComputeSyncWindow(safe, overlap, now)
-			logf("table %s: checkpoint window [%s .. %s] (safeThrough=%s)", tbl.Name, window.Start.Format(time.RFC3339), window.End.Format(time.RFC3339), safe.Format(time.RFC3339))
+			debugf("table %s: checkpoint window [%s .. %s] (safeThrough=%s)", tbl.Name, window.Start.Format(time.RFC3339), window.End.Format(time.RFC3339), safe.Format(time.RFC3339))
 		}
 
-		var mBlue map[string]time.Time
-		logf("table %s: fetching blue manifest...", tbl.Name)
-		err = withHeartbeat(ctx, 10*time.Second, logf, fmt.Sprintf("table %s: blue manifest request", tbl.Name), func() error {
-			var fetchErr error
-			mBlue, fetchErr = odata.FetchManifestWithProgress(ctx, blueClient, tbl.Name, window.Start, window.End, pk, mod, func(pageNum, pageRows, totalRows int) {
-				logf("table %s: blue manifest page=%d rows=%d total=%d", tbl.Name, pageNum, pageRows, totalRows)
-			})
-			return fetchErr
-		})
+		tableStart := time.Now()
+		mBlue, mGreen, err := fetchManifestPair(ctx, blueClient, greenClient, tbl.Name, window, pk, mod, logf, debugf)
 		if err != nil {
-			return fmt.Errorf("%s blue manifest: %w", tbl.Name, err)
+			return err
 		}
-		var mGreen map[string]time.Time
-		logf("table %s: fetching green manifest...", tbl.Name)
-		err = withHeartbeat(ctx, 10*time.Second, logf, fmt.Sprintf("table %s: green manifest request", tbl.Name), func() error {
-			var fetchErr error
-			mGreen, fetchErr = odata.FetchManifestWithProgress(ctx, greenClient, tbl.Name, window.Start, window.End, pk, mod, func(pageNum, pageRows, totalRows int) {
-				logf("table %s: green manifest page=%d rows=%d total=%d", tbl.Name, pageNum, pageRows, totalRows)
-			})
-			return fetchErr
-		})
-		if err != nil {
-			return fmt.Errorf("%s green manifest: %w", tbl.Name, err)
-		}
-		logf("table %s: manifest rows blue=%d green=%d", tbl.Name, len(mBlue), len(mGreen))
 
 		planAll := domain.BuildPlan(mBlue, mGreen, nil)
 		plan := filterPlanOneWay(planAll, mode)
-		if mode == "" {
-			logf("table %s: plan ops=%d", tbl.Name, len(plan))
-		} else {
-			logf("table %s: plan ops=%d (oneWay=%s filtered=%d)", tbl.Name, len(plan), mode, len(planAll)-len(plan))
-		}
-		for _, op := range plan {
-			logf("  %s %s", op.Kind, op.RecordID)
-		}
 
 		if len(plan) > 0 && !opt.Apply {
+			logTablePlan(logf, tbl.Name, len(mBlue), len(mGreen), plan, mode, len(planAll)-len(plan), tableStart)
 			logf("table %s: dry-run only — not applying, verifying, or advancing checkpoint (use -apply)", tbl.Name)
 			continue
 		}
@@ -195,17 +174,14 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 			if err := state.SaveSafeThrough(opt.StatePath, tbl.Name, window.End); err != nil {
 				return err
 			}
-			logf("table %s: no changes; checkpoint advanced to %s", tbl.Name, window.End.Format(time.RFC3339))
+			logf("table %s: scanned blue=%d green=%d ops=0 checkpoint=%s duration=%s", tbl.Name, len(mBlue), len(mGreen), window.End.Format(time.RFC3339), time.Since(tableStart).Round(time.Millisecond))
 			continue
 		}
+		logTablePlan(logf, tbl.Name, len(mBlue), len(mGreen), plan, mode, len(planAll)-len(plan), tableStart)
 
-		blueProps, err := entityPropertiesWithRetry(ctx, blueClient, tbl.Name, logf)
+		blueProps, greenProps, err := entityPropertiesPair(ctx, blueClient, greenClient, tbl.Name, logf)
 		if err != nil {
-			return fmt.Errorf("%s blue metadata: %w", tbl.Name, err)
-		}
-		greenProps, err := entityPropertiesWithRetry(ctx, greenClient, tbl.Name, logf)
-		if err != nil {
-			return fmt.Errorf("%s green metadata: %w", tbl.Name, err)
+			return err
 		}
 		allowed := buildSyncFieldAllowlist(blueProps, greenProps, tbl.FieldOverrides, tbl.IgnoreFields, pk, mod)
 		if len(allowed) == 0 {
@@ -224,7 +200,7 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 					end = len(plan)
 				}
 				chunk := plan[i:end]
-				logf("table %s: apply batch %d/%d ops=%d", tbl.Name, bi+1, totalBatches, len(chunk))
+				debugf("table %s: apply batch %d/%d ops=%d", tbl.Name, bi+1, totalBatches, len(chunk))
 				batchDeferred, err := applyPlan(ctx, blueClient, greenClient, tbl.Name, chunk, allowed, pk, mod, maxWorkers, i, len(plan), logf)
 				if err != nil {
 					return fmt.Errorf("%s apply batch %d: %w", tbl.Name, bi+1, err)
@@ -252,11 +228,11 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 		if cfg.VerifyStrict() && len(deferred) == 0 {
 			// Verify: re-fetch manifests; expect empty plan.
 			var mBlue2 map[string]time.Time
-			logf("table %s: verify fetch blue manifest...", tbl.Name)
+			debugf("table %s: verify fetch blue manifest...", tbl.Name)
 			err = withHeartbeat(ctx, 10*time.Second, logf, fmt.Sprintf("table %s: verify blue request", tbl.Name), func() error {
 				var fetchErr error
 				mBlue2, fetchErr = odata.FetchManifestWithProgress(ctx, blueClient, tbl.Name, window.Start, endThrough, pk, mod, func(pageNum, pageRows, totalRows int) {
-					logf("table %s: verify blue page=%d rows=%d total=%d", tbl.Name, pageNum, pageRows, totalRows)
+					debugf("table %s: verify blue page=%d rows=%d total=%d", tbl.Name, pageNum, pageRows, totalRows)
 				})
 				return fetchErr
 			})
@@ -264,11 +240,11 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 				return fmt.Errorf("%s verify blue: %w", tbl.Name, err)
 			}
 			var mGreen2 map[string]time.Time
-			logf("table %s: verify fetch green manifest...", tbl.Name)
+			debugf("table %s: verify fetch green manifest...", tbl.Name)
 			err = withHeartbeat(ctx, 10*time.Second, logf, fmt.Sprintf("table %s: verify green request", tbl.Name), func() error {
 				var fetchErr error
 				mGreen2, fetchErr = odata.FetchManifestWithProgress(ctx, greenClient, tbl.Name, window.Start, endThrough, pk, mod, func(pageNum, pageRows, totalRows int) {
-					logf("table %s: verify green page=%d rows=%d total=%d", tbl.Name, pageNum, pageRows, totalRows)
+					debugf("table %s: verify green page=%d rows=%d total=%d", tbl.Name, pageNum, pageRows, totalRows)
 				})
 				return fetchErr
 			})
@@ -290,13 +266,13 @@ func Once(ctx context.Context, cfg *config.Config, opt Options) error {
 		} else if cfg.VerifyStrict() && len(deferred) > 0 {
 			logf("table %s: verify skipped (deferredOps=%d)", tbl.Name, len(deferred))
 		} else {
-			logf("table %s: verify skipped (verifyMode=off)", tbl.Name)
+			debugf("table %s: verify skipped (verifyMode=off)", tbl.Name)
 		}
 
 		if err := state.SaveSafeThrough(opt.StatePath, tbl.Name, endThrough); err != nil {
 			return err
 		}
-		logf("table %s: checkpoint advanced to %s", tbl.Name, endThrough.Format(time.RFC3339))
+		logf("table %s: checkpoint advanced to %s duration=%s", tbl.Name, endThrough.Format(time.RFC3339), time.Since(tableStart).Round(time.Millisecond))
 	}
 	return nil
 }
@@ -390,6 +366,64 @@ func filterRecord(rec map[string]any, allowed map[string]struct{}) map[string]an
 		}
 	}
 	return out
+}
+
+func logTablePlan(logf func(string, ...any), table string, blueRows, greenRows int, plan []domain.Op, mode string, filtered int, start time.Time) {
+	if mode == "" {
+		logf("table %s: scanned blue=%d green=%d ops=%d duration=%s", table, blueRows, greenRows, len(plan), time.Since(start).Round(time.Millisecond))
+	} else {
+		logf("table %s: scanned blue=%d green=%d ops=%d oneWay=%s filtered=%d duration=%s", table, blueRows, greenRows, len(plan), mode, filtered, time.Since(start).Round(time.Millisecond))
+	}
+	for _, op := range plan {
+		logf("table %s: %s %s", table, op.Kind, op.RecordID)
+	}
+}
+
+func fetchManifestPair(ctx context.Context, blueClient, greenClient *odata.Client, entity string, window domain.SyncWindow, pk, mod string, logf func(string, ...any), debugf func(string, ...any)) (map[string]time.Time, map[string]time.Time, error) {
+	type result struct {
+		side string
+		rows map[string]time.Time
+		err  error
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch := make(chan result, 2)
+
+	fetch := func(side string, cli *odata.Client) {
+		if debugf != nil {
+			debugf("table %s: fetching %s manifest...", entity, side)
+		}
+		var rows map[string]time.Time
+		err := withHeartbeat(ctx, 10*time.Second, logf, fmt.Sprintf("table %s: %s manifest request", entity, side), func() error {
+			var fetchErr error
+			rows, fetchErr = odata.FetchManifestWithProgress(ctx, cli, entity, window.Start, window.End, pk, mod, func(pageNum, pageRows, totalRows int) {
+				if debugf != nil {
+					debugf("table %s: %s manifest page=%d rows=%d total=%d", entity, side, pageNum, pageRows, totalRows)
+				}
+			})
+			return fetchErr
+		})
+		ch <- result{side: side, rows: rows, err: err}
+	}
+
+	go fetch("blue", blueClient)
+	go fetch("green", greenClient)
+
+	var blueRows, greenRows map[string]time.Time
+	for i := 0; i < 2; i++ {
+		res := <-ch
+		if res.err != nil {
+			cancel()
+			return nil, nil, fmt.Errorf("%s %s manifest: %w", entity, res.side, res.err)
+		}
+		switch res.side {
+		case "blue":
+			blueRows = res.rows
+		case "green":
+			greenRows = res.rows
+		}
+	}
+	return blueRows, greenRows, nil
 }
 
 func fieldsFromAllowlist(allowed map[string]struct{}) []string {
@@ -1002,7 +1036,7 @@ func isRecordKeyMismatchError(err error) bool {
 	return strings.Contains(body, "incompatible data types") || strings.Contains(body, `"code":"8309"`) || strings.Contains(body, `"code": "8309"`)
 }
 
-func entityPropertiesWithRetry(ctx context.Context, cli *odata.Client, entity string, logf func(string, ...any)) ([]odata.PropertySpec, error) {
+func entityPropertiesWithRetry(ctx context.Context, cli *odata.Client, entity, side string, logf func(string, ...any)) ([]odata.PropertySpec, error) {
 	maxAttempts := metadataRetryMaxAttempts
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -1013,8 +1047,12 @@ func entityPropertiesWithRetry(ctx context.Context, cli *odata.Client, entity st
 	}
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		props, err := odata.EntityProperties(ctx, cli, entity)
+		start := time.Now()
+		props, source, err := odata.EntityPropertiesPreferThinSchema(ctx, cli, entity)
 		if err == nil {
+			if logf != nil {
+				logf("table %s: %s schema source=%s fields=%d duration=%s", entity, side, source, len(props), time.Since(start).Round(time.Millisecond))
+			}
 			return props, nil
 		}
 		lastErr = err
@@ -1023,7 +1061,7 @@ func entityPropertiesWithRetry(ctx context.Context, cli *odata.Client, entity st
 		}
 		wait := time.Duration(attempt) * base
 		if logf != nil {
-			logf("table %s: metadata transient error, retry %d/%d in %s (%v)", entity, attempt, maxAttempts, wait, err)
+			logf("table %s: %s schema transient error, retry %d/%d in %s (%v)", entity, side, attempt, maxAttempts, wait, err)
 		}
 		select {
 		case <-ctx.Done():
@@ -1032,6 +1070,40 @@ func entityPropertiesWithRetry(ctx context.Context, cli *odata.Client, entity st
 		}
 	}
 	return nil, lastErr
+}
+
+func entityPropertiesPair(ctx context.Context, blueClient, greenClient *odata.Client, entity string, logf func(string, ...any)) ([]odata.PropertySpec, []odata.PropertySpec, error) {
+	type result struct {
+		side  string
+		props []odata.PropertySpec
+		err   error
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch := make(chan result, 2)
+
+	fetch := func(side string, cli *odata.Client) {
+		props, err := entityPropertiesWithRetry(ctx, cli, entity, side, logf)
+		ch <- result{side: side, props: props, err: err}
+	}
+	go fetch("blue", blueClient)
+	go fetch("green", greenClient)
+
+	var blueProps, greenProps []odata.PropertySpec
+	for i := 0; i < 2; i++ {
+		res := <-ch
+		if res.err != nil {
+			cancel()
+			return nil, nil, fmt.Errorf("%s %s metadata: %w", entity, res.side, res.err)
+		}
+		switch res.side {
+		case "blue":
+			blueProps = res.props
+		case "green":
+			greenProps = res.props
+		}
+	}
+	return blueProps, greenProps, nil
 }
 
 func isTransientMetadataError(err error) bool {

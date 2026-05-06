@@ -1,8 +1,10 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -173,6 +175,157 @@ func TestOnce_NoPlan_SkipsMetadataAndVerify(t *testing.T) {
 	}
 	if atomic.LoadInt32(&metadataHits) != 0 {
 		t.Fatalf("expected 0 metadata requests on no-plan run, got %d", metadataHits)
+	}
+}
+
+func TestOnce_DefaultLogsSuppressManifestPages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "$filter=") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Servers: []config.Server{
+			{ID: "blue", URL: srv.URL + "/blue", Username: "u", Password: "p"},
+			{ID: "green", URL: srv.URL + "/green", Username: "u", Password: "p"},
+		},
+		Tables:          []config.TableSpec{{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"}},
+		InitialLookback: "1d",
+		OverlapMinutes:  10,
+		SchemaMode:      "intersection",
+	}
+	var buf bytes.Buffer
+	err := Once(context.Background(), cfg, Options{
+		Apply:     true,
+		StatePath: filepath.Join(t.TempDir(), "state.json"),
+		Logger:    log.New(&buf, "", 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := buf.String()
+	if strings.Contains(logs, "manifest page=") || strings.Contains(logs, "fetching blue manifest") {
+		t.Fatalf("default logs should suppress page-level manifest noise:\n%s", logs)
+	}
+	if !strings.Contains(logs, "table People: scanned blue=0 green=0 ops=0") {
+		t.Fatalf("expected concise table summary, got:\n%s", logs)
+	}
+}
+
+func TestOnce_VerboseLogsManifestPages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "$filter=") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Servers: []config.Server{
+			{ID: "blue", URL: srv.URL + "/blue", Username: "u", Password: "p"},
+			{ID: "green", URL: srv.URL + "/green", Username: "u", Password: "p"},
+		},
+		Tables:          []config.TableSpec{{Name: "People", PrimaryKey: "id", ModifiedField: "ModificationTimestamp"}},
+		InitialLookback: "1d",
+		OverlapMinutes:  10,
+		SchemaMode:      "intersection",
+	}
+	var buf bytes.Buffer
+	err := Once(context.Background(), cfg, Options{
+		Apply:     true,
+		Verbose:   true,
+		StatePath: filepath.Join(t.TempDir(), "state.json"),
+		Logger:    log.New(&buf, "", 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "manifest page=") || !strings.Contains(logs, "fetching blue manifest") {
+		t.Fatalf("verbose logs should include manifest detail, got:\n%s", logs)
+	}
+}
+
+func TestFetchManifestPair_FetchesBlueAndGreenConcurrently(t *testing.T) {
+	const delay = 120 * time.Millisecond
+	handler := func(id string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(delay)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"value": []map[string]any{
+					{"id": id, "ModificationTimestamp": "2026-05-01T00:00:00Z"},
+				},
+			})
+		}
+	}
+	blueSrv := httptest.NewServer(handler("blue-row"))
+	defer blueSrv.Close()
+	greenSrv := httptest.NewServer(handler("green-row"))
+	defer greenSrv.Close()
+
+	blueCli := &odata.Client{BaseURL: blueSrv.URL + "/db", Username: "u", Password: "p"}
+	greenCli := &odata.Client{BaseURL: greenSrv.URL + "/db", Username: "u", Password: "p"}
+	window := domain.SyncWindow{
+		Start: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC),
+	}
+
+	start := time.Now()
+	blueManifest, greenManifest, err := fetchManifestPair(context.Background(), blueCli, greenCli, "People", window, "id", "ModificationTimestamp", nil, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := blueManifest["blue-row"]; !ok {
+		t.Fatalf("missing blue row: %+v", blueManifest)
+	}
+	if _, ok := greenManifest["green-row"]; !ok {
+		t.Fatalf("missing green row: %+v", greenManifest)
+	}
+	if elapsed >= delay*2 {
+		t.Fatalf("expected concurrent fetches under %s, got %s", delay*2, elapsed)
+	}
+}
+
+func TestEntityPropertiesPair_FetchesBlueAndGreenConcurrently(t *testing.T) {
+	const delay = 120 * time.Millisecond
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/FileMaker_Fields") {
+			http.NotFound(w, r)
+			return
+		}
+		time.Sleep(delay)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"value": []map[string]any{
+				{"TableName": "People", "FieldName": "id", "FieldType": "varchar", "FieldClass": "Normal", "FieldReps": 1, "FieldId": 1, "ModCount": 1},
+			},
+		})
+	})
+	blueSrv := httptest.NewServer(handler)
+	defer blueSrv.Close()
+	greenSrv := httptest.NewServer(handler)
+	defer greenSrv.Close()
+
+	blueCli := &odata.Client{BaseURL: blueSrv.URL + "/db", Username: "u", Password: "p"}
+	greenCli := &odata.Client{BaseURL: greenSrv.URL + "/db", Username: "u", Password: "p"}
+
+	start := time.Now()
+	blueProps, greenProps, err := entityPropertiesPair(context.Background(), blueCli, greenCli, "People", nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blueProps) != 1 || len(greenProps) != 1 {
+		t.Fatalf("unexpected props blue=%+v green=%+v", blueProps, greenProps)
+	}
+	if elapsed >= delay*2 {
+		t.Fatalf("expected concurrent schema fetches under %s, got %s", delay*2, elapsed)
 	}
 }
 
