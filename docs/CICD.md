@@ -5,14 +5,13 @@ This setup assumes:
 - source control is GitHub
 - images are pushed to Docker Hub
 - Rancher manages a Kubernetes cluster in a single data center
-- Free Sync runs as one replica with a persistent state file
+- Free Sync runs as one replica with ephemeral on-pod sync state
 
 The committed baseline files are:
 
 - `.github/workflows/ci-cd.yml`
 - `deploy/k8s/deployment.yaml`
 - `deploy/k8s/service.yaml`
-- `deploy/k8s/pvc.yaml`
 - `deploy/k8s/trigger-cronjob.yaml`
 
 The GitHub workflow only tests and publishes images to Docker Hub. Rancher and Kubernetes deployment remain manual.
@@ -29,8 +28,9 @@ Add these GitHub repository secrets:
 
 The workflow publishes:
 
-- `docker.io/<DOCKERHUB_NAMESPACE>/freesync:latest`
 - `docker.io/<DOCKERHUB_NAMESPACE>/freesync:sha-<git-sha>`
+- `docker.io/<DOCKERHUB_NAMESPACE>/freesync:v<release>`
+- `docker.io/<DOCKERHUB_NAMESPACE>/freesync:latest` when the push is a release tag such as `v0.7`
 
 For your currently open Docker Hub pages, the likely values are:
 
@@ -51,7 +51,7 @@ Create the FileMaker config secret from your real local config file:
 
 ```bash
 kubectl -n freesync create secret generic freesync-config \
-  --from-file=dev.local.json=config/dev.local.json
+  --from-file=prod.local.json=config/prod.local.json
 ```
 
 Create the trigger token secret:
@@ -70,38 +70,49 @@ kubectl -n freesync create secret docker-registry dockerhub-regcred \
   --docker-password="$DOCKERHUB_TOKEN"
 ```
 
-## 3. Prepare storage
+## 3. Runtime state
 
-Apply the PVC:
-
-```bash
-kubectl -n freesync apply -f deploy/k8s/pvc.yaml
-```
-
-If your cluster requires an explicit storage class, add `storageClassName` to `deploy/k8s/pvc.yaml` before the first deploy.
+`FREESYNC_STATE` is still written to `/app/data/sync-state.json`, but the deployment now uses `emptyDir` storage. That means the file is writable during runtime and resets on pod restart.
 
 Because this service stores checkpoints in one JSON file, keep the deployment at `replicas: 1` unless you introduce shared locking or externalize state.
 
 ## 4. Build and publish flow
 
-Merge to `main` or run the GitHub Actions workflow manually.
+Pushes to `main` publish commit-specific Docker images. Release tags publish the human-friendly version and update `latest`.
 
 The workflow does this:
 
 1. runs `go test ./... -count=1`
 2. builds and pushes the Docker image to Docker Hub
 
-Published tags:
+Published tags from `main`:
 
+- `docker.io/<DOCKERHUB_NAMESPACE>/freesync:sha-<git-sha>`
+
+Published tags from a git tag like `v0.7`:
+
+- `docker.io/<DOCKERHUB_NAMESPACE>/freesync:v0.7`
 - `docker.io/<DOCKERHUB_NAMESPACE>/freesync:latest`
 - `docker.io/<DOCKERHUB_NAMESPACE>/freesync:sha-<git-sha>`
+
+Typical release flow:
+
+1. Merge the desired code to `main`.
+2. Create and push a git tag, for example:
+
+```bash
+git tag v0.7
+git push origin v0.7
+```
+
+3. Wait for the workflow to publish `v0.7` and refresh `latest`.
+4. When ready, update the Rancher workload image to `docker.io/<DOCKERHUB_NAMESPACE>/freesync:v0.7`.
 
 ## 5. Manual Rancher deployment
 
 Apply the base manifests from your machine or Rancher shell:
 
 ```bash
-kubectl -n freesync apply -f deploy/k8s/pvc.yaml
 kubectl -n freesync apply -f deploy/k8s/service.yaml
 kubectl -n freesync apply -f deploy/k8s/deployment.yaml
 ```
@@ -168,5 +179,5 @@ Adjust that in `deploy/k8s/trigger-cronjob.yaml` to match your desired sync freq
 - Restrict service exposure to internal traffic only, or front it with an internal ingress.
 - Add a NetworkPolicy if your cluster uses network segmentation.
 - Keep `FREESYNC_VERBOSE=false` in normal operations.
-- Back up the PVC because it contains sync checkpoint state.
+- Expect checkpoint state to reset on pod restart unless you later externalize it.
 - Consider pinning resource requests and limits after observing a few production sync runs.

@@ -55,8 +55,7 @@ spec:
           secret:
             secretName: freesync-config
         - name: state
-          persistentVolumeClaim:
-            claimName: freesync-state-pvc
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -94,6 +93,6 @@ curl -X POST "http://freesync.default.svc.cluster.local:8080/run?verbose=true" \
 ## Notes
 
 - Keep deployment replica count at `1` unless you externalize/lock state.
-- Persist `FREESYNC_STATE` on a PVC so checkpoints survive restarts. One state file can track multiple configured file groups.
+- `FREESYNC_STATE` writes to ephemeral pod storage in this example, so checkpoints reset on restart. One state file can track multiple configured file groups while the pod is running.
 - Use network policy / ingress auth in addition to bearer token.
 - Keep `FREESYNC_VERBOSE=false` for normal operations. Default logs show concise table summaries and record IDs being synced; use `verbose=true` only when debugging.

@@ -201,7 +201,7 @@ docker push your-registry/freesync:latest
 2) Deploy one replica with:
 
 - config mounted at `/app/config/dev.local.json`
-- persistent state mounted at `/app/data/sync-state.json`
+- writable ephemeral state at `/app/data/sync-state.json`
 - `FREESYNC_TRIGGER_TOKEN` from secret
 - args: `["serve","-listen",":8080","-apply"]`
 
