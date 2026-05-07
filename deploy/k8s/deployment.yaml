@@ -19,23 +19,6 @@ spec:
         - name: freesync
           image: docker.io/delfseng/freesync:sha-4f19b6ebbdad1abb94278ca13bc367e998564b51
           imagePullPolicy: Always
-          args:
-            - serve
-            - -listen
-            - :8080
-            - -apply
-          env:
-            - name: FREESYNC_CONFIG
-              value: /app/config/prod.local.json
-            - name: FREESYNC_STATE
-              value: /app/data/sync-state.json
-            - name: FREESYNC_VERBOSE
-              value: "false"
-            - name: FREESYNC_TRIGGER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: freesync-secret
-                  key: triggerToken
           ports:
             - containerPort: 8080
               name: http

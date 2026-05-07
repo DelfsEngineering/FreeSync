@@ -17,6 +17,14 @@ func writeConfigFile(t *testing.T, body string) string {
 
 func TestLoadFile_multiFileExample(t *testing.T) {
 	path := writeConfigFile(t, `{
+  "runtime": {
+    "listen": ":9090",
+    "statePath": "/tmp/sync-state.json",
+    "triggerToken": "secret",
+    "oneWay": "to-blue",
+    "verbose": true,
+    "applyByDefault": false
+  },
   "defaults": { "primaryKey": "id", "modifiedField": "ModificationTimestamp" },
   "files": [
     {
@@ -46,6 +54,24 @@ func TestLoadFile_multiFileExample(t *testing.T) {
 	}
 	if c.Defaults.PrimaryKey != "id" {
 		t.Fatal("defaults")
+	}
+	if got := c.ListenAddr(); got != ":9090" {
+		t.Fatalf("listen: got %q want :9090", got)
+	}
+	if got := c.StateFilePath(); got != "/tmp/sync-state.json" {
+		t.Fatalf("statePath: got %q want /tmp/sync-state.json", got)
+	}
+	if got := c.TriggerBearerToken(); got != "secret" {
+		t.Fatalf("trigger token: got %q want secret", got)
+	}
+	if got := c.OneWayMode(); got != "to-blue" {
+		t.Fatalf("oneWay: got %q want to-blue", got)
+	}
+	if !c.VerboseLogging() {
+		t.Fatal("verbose should be true")
+	}
+	if c.ApplyDefault() {
+		t.Fatal("applyByDefault=false should disable default apply")
 	}
 	if len(c.Files[0].Tables) == 0 || len(c.Files[0].Tables[0].IgnoreFields) != 1 || c.Files[0].Tables[0].IgnoreFields[0] != "thumbURL" {
 		t.Fatalf("ignoreFields not loaded from example: %+v", c.Files[0].Tables)
@@ -149,6 +175,28 @@ func TestBootstrapMode_defaultAndBinary(t *testing.T) {
 	c.BootstrapMode = "bogus"
 	if c.BootstrapBinary() {
 		t.Fatal("unknown bootstrap mode should fall back to fixed")
+	}
+}
+
+func TestRuntimeDefaults(t *testing.T) {
+	c := &Config{}
+	if got := c.ListenAddr(); got != ":8080" {
+		t.Fatalf("listen default: got %q want :8080", got)
+	}
+	if got := c.StateFilePath(); got != "data/sync-state.json" {
+		t.Fatalf("statePath default: got %q want data/sync-state.json", got)
+	}
+	if got := c.TriggerBearerToken(); got != "" {
+		t.Fatalf("trigger token default: got %q want empty", got)
+	}
+	if got := c.OneWayMode(); got != "" {
+		t.Fatalf("oneWay default: got %q want empty", got)
+	}
+	if c.VerboseLogging() {
+		t.Fatal("verbose default should be false")
+	}
+	if !c.ApplyDefault() {
+		t.Fatal("apply default should be true")
 	}
 }
 

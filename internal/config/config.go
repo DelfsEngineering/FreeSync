@@ -10,16 +10,17 @@ import (
 
 // Config matches the committed example shape; unknown JSON keys are ignored.
 type Config struct {
-	Files           []FileConfig `json:"files"`
-	Defaults        Defaults    `json:"defaults"`
-	OverlapMinutes  int         `json:"overlapMinutes"`
-	InitialLookback string      `json:"initialLookback"`
-	MaxLookback     string      `json:"maxLookback"`
-	BootstrapMode   string      `json:"bootstrapMode"`
-	SchemaMode      string      `json:"schemaMode"`
-	BatchSize       int         `json:"batchSize"`
-	MaxWorkers      int         `json:"maxWorkers"`
-	VerifyMode      string      `json:"verifyMode"`
+	Files           []FileConfig  `json:"files"`
+	Defaults        Defaults      `json:"defaults"`
+	Runtime         RuntimeConfig `json:"runtime"`
+	OverlapMinutes  int           `json:"overlapMinutes"`
+	InitialLookback string        `json:"initialLookback"`
+	MaxLookback     string        `json:"maxLookback"`
+	BootstrapMode   string        `json:"bootstrapMode"`
+	SchemaMode      string        `json:"schemaMode"`
+	BatchSize       int           `json:"batchSize"`
+	MaxWorkers      int           `json:"maxWorkers"`
+	VerifyMode      string        `json:"verifyMode"`
 }
 
 type FileConfig struct {
@@ -47,6 +48,15 @@ type TableSpec struct {
 type Defaults struct {
 	PrimaryKey    string `json:"primaryKey"`
 	ModifiedField string `json:"modifiedField"`
+}
+
+type RuntimeConfig struct {
+	Listen         string `json:"listen"`
+	StatePath      string `json:"statePath"`
+	TriggerToken   string `json:"triggerToken"`
+	OneWay         string `json:"oneWay"`
+	Verbose        bool   `json:"verbose"`
+	ApplyByDefault *bool  `json:"applyByDefault"`
 }
 
 // LoadFile reads and parses a JSON config file.
@@ -149,6 +159,48 @@ func (c *Config) ApplyWorkers() int {
 		return 8
 	}
 	return c.MaxWorkers
+}
+
+// ListenAddr returns the HTTP listen address for serve mode.
+func (c *Config) ListenAddr() string {
+	if v := strings.TrimSpace(c.Runtime.Listen); v != "" {
+		return v
+	}
+	return ":8080"
+}
+
+// StateFilePath returns the checkpoint path for runtime state.
+func (c *Config) StateFilePath() string {
+	if v := strings.TrimSpace(c.Runtime.StatePath); v != "" {
+		return v
+	}
+	if _, err := os.Stat("/app/data"); err == nil {
+		return "/app/data/sync-state.json"
+	}
+	return "data/sync-state.json"
+}
+
+// TriggerBearerToken returns the optional bearer token for POST /run.
+func (c *Config) TriggerBearerToken() string {
+	return strings.TrimSpace(c.Runtime.TriggerToken)
+}
+
+// OneWayMode returns the configured default one-way mode, if any.
+func (c *Config) OneWayMode() string {
+	return strings.TrimSpace(c.Runtime.OneWay)
+}
+
+// VerboseLogging reports whether verbose logging should be enabled by default.
+func (c *Config) VerboseLogging() bool {
+	return c.Runtime.Verbose
+}
+
+// ApplyDefault reports whether serve mode should apply writes by default.
+func (c *Config) ApplyDefault() bool {
+	if c.Runtime.ApplyByDefault == nil {
+		return true
+	}
+	return *c.Runtime.ApplyByDefault
 }
 
 // VerifyStrict reports whether strict post-apply verification is enabled.

@@ -89,7 +89,7 @@ Endpoints:
 Token auth (recommended):
 
 ```bash
-FREESYNC_TRIGGER_TOKEN=supersecret ./freesync serve -config config/dev.local.json
+./freesync serve -config config/dev.local.json -token supersecret
 curl -X POST http://localhost:8080/run \
   -H "Authorization: Bearer supersecret"
 ```
@@ -107,18 +107,27 @@ curl -X POST http://localhost:8080/run \
 - Performance knobs: `batchSize` (default `50`), `maxWorkers` (default `8`), `verifyMode` (`off` default, `strict` for full post-apply verification).
 - Bootstrap behavior: `bootstrapMode` (`fixed` default, `binary` for successive approximation of divergence boundary on first run).
 
-Environment (optional):
+Runtime configuration is intended to live in the same JSON file as the sync mappings. The default config lookup order is:
+
+1. `FREESYNC_CONFIG` if set
+2. `/app/config/dev.local.json`
+3. `/app/config/prod.local.json`
+4. `config/dev.local.json`
+5. `config/prod.local.json`
+6. `config/dev.example.json`
+
+Optional environment overrides (mostly for advanced/legacy use):
 
 | Variable | Default |
 |----------|---------|
-| `FREESYNC_CONFIG` | `config/dev.example.json` |
-| `FREESYNC_STATE` | `data/sync-state.json` |
-| `FREESYNC_TRIGGER_TOKEN` | empty (no auth required if unset) |
-| `FREESYNC_LISTEN` | `:8080` (serve mode) |
-| `FREESYNC_ONE_WAY` | empty (bidirectional) |
-| `FREESYNC_VERBOSE` | `false` |
+| `FREESYNC_CONFIG` | first existing config path from the lookup order above |
+| `FREESYNC_STATE` | config `runtime.statePath`, else `data/sync-state.json` locally or `/app/data/sync-state.json` in the container |
+| `FREESYNC_LISTEN` | config `runtime.listen`, else `:8080` |
+| `FREESYNC_ONE_WAY` | config `runtime.oneWay`, else empty (bidirectional) |
+| `FREESYNC_VERBOSE` | config `runtime.verbose`, else `false` |
+| `FREESYNC_APPLY` | config `runtime.applyByDefault`, else `true` in `serve` mode |
 
-Flags **`-config`** and **`-state`** set the same paths.
+Flags override both the JSON file and env vars when you need a one-off change.
 
 ## Sync Rules
 
@@ -181,10 +190,7 @@ Notes:
 ```bash
 docker build -t freesync:latest .
 docker run --rm -p 8080:8080 \
-  -e FREESYNC_CONFIG=/app/config/dev.local.json \
-  -e FREESYNC_STATE=/app/data/sync-state.json \
-  -e FREESYNC_TRIGGER_TOKEN=supersecret \
-  -v "$(pwd)/config:/app/config:ro" \
+  -v "$(pwd)/config/dev.local.json:/app/config/dev.local.json:ro" \
   -v "$(pwd)/data:/app/data" \
   freesync:latest
 ```
@@ -200,10 +206,10 @@ docker push your-registry/freesync:latest
 
 2) Deploy one replica with:
 
-- config mounted at `/app/config/dev.local.json`
+- one config file mounted at `/app/config/prod.local.json`
 - writable ephemeral state at `/app/data/sync-state.json`
-- `FREESYNC_TRIGGER_TOKEN` from secret
-- args: `["serve","-listen",":8080","-apply"]`
+- runtime defaults such as listen/apply/verbosity stored in that JSON file
+- trigger token stored in that same JSON file under `runtime.triggerToken`
 
 3) Trigger sync:
 

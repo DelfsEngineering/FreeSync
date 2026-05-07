@@ -4,6 +4,14 @@
     "primaryKey": "id",
     "modifiedField": "ModificationTimestamp"
   },
+  "runtime": {
+    "listen": ":8080",
+    "statePath": "/app/data/sync-state.json",
+    "triggerToken": "set-a-bearer-token-if-you-want-auth",
+    "oneWay": "",
+    "verbose": false,
+    "applyByDefault": true
+  },
   "files": [
     {
       "id": "your_database",

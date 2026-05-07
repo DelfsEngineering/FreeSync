@@ -29,19 +29,6 @@ spec:
       containers:
         - name: freesync
           image: your-registry/freesync:latest
-          args: ["serve", "-listen", ":8080", "-apply"]
-          env:
-            - name: FREESYNC_CONFIG
-              value: /app/config/dev.local.json
-            - name: FREESYNC_STATE
-              value: /app/data/sync-state.json
-            - name: FREESYNC_TRIGGER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: freesync-secret
-                  key: triggerToken
-            - name: FREESYNC_VERBOSE
-              value: "false"
           ports:
             - containerPort: 8080
           volumeMounts:
@@ -54,6 +41,9 @@ spec:
         - name: config
           secret:
             secretName: freesync-config
+            items:
+              - key: prod.local.json
+                path: prod.local.json
         - name: state
           emptyDir: {}
 ---
@@ -71,28 +61,34 @@ spec:
 
 ## Trigger a sync
 
+Use the same token value stored in `runtime.triggerToken` inside your mounted config file.
+
 ```bash
+TOKEN=replace-with-runtime-trigger-token
 curl -X POST "http://freesync.default.svc.cluster.local:8080/run" \
-  -H "Authorization: Bearer ${FREESYNC_TRIGGER_TOKEN}"
+  -H "Authorization: Bearer ${TOKEN}"
 ```
 
 Dry-run trigger:
 
 ```bash
+TOKEN=replace-with-runtime-trigger-token
 curl -X POST "http://freesync.default.svc.cluster.local:8080/run?apply=false" \
-  -H "Authorization: Bearer ${FREESYNC_TRIGGER_TOKEN}"
+  -H "Authorization: Bearer ${TOKEN}"
 ```
 
 Verbose one-off trigger for debugging page-level manifest/schema detail:
 
 ```bash
+TOKEN=replace-with-runtime-trigger-token
 curl -X POST "http://freesync.default.svc.cluster.local:8080/run?verbose=true" \
-  -H "Authorization: Bearer ${FREESYNC_TRIGGER_TOKEN}"
+  -H "Authorization: Bearer ${TOKEN}"
 ```
 
 ## Notes
 
 - Keep deployment replica count at `1` unless you externalize/lock state.
-- `FREESYNC_STATE` writes to ephemeral pod storage in this example, so checkpoints reset on restart. One state file can track multiple configured file groups while the pod is running.
+- Put both sync rules and runtime defaults in the same JSON file; the container will automatically look for `/app/config/prod.local.json`.
+- `runtime.statePath` should point at writable pod storage such as `/app/data/sync-state.json`, which resets on restart in this example.
 - Use network policy / ingress auth in addition to bearer token.
-- Keep `FREESYNC_VERBOSE=false` for normal operations. Default logs show concise table summaries and record IDs being synced; use `verbose=true` only when debugging.
+- Keep `runtime.verbose=false` for normal operations. Default logs show concise table summaries and record IDs being synced; use `verbose=true` only when debugging.

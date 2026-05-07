@@ -30,7 +30,7 @@ The workflow publishes:
 
 - `docker.io/<DOCKERHUB_NAMESPACE>/freesync:sha-<git-sha>`
 - `docker.io/<DOCKERHUB_NAMESPACE>/freesync:v<release>`
-- `docker.io/<DOCKERHUB_NAMESPACE>/freesync:latest` when the push is a release tag such as `v0.7`
+- `docker.io/<DOCKERHUB_NAMESPACE>/freesync:latest`
 
 For your currently open Docker Hub pages, the likely values are:
 
@@ -47,18 +47,11 @@ Create the namespace once if you want to prepare everything manually:
 kubectl create namespace freesync
 ```
 
-Create the FileMaker config secret from your real local config file:
+Create the FileMaker config secret from your real local config file. This one JSON file now carries both the sync definitions and the normal runtime defaults, including the trigger token.
 
 ```bash
 kubectl -n freesync create secret generic freesync-config \
   --from-file=prod.local.json=config/prod.local.json
-```
-
-Create the trigger token secret:
-
-```bash
-kubectl -n freesync create secret generic freesync-secret \
-  --from-literal=triggerToken='replace-with-a-long-random-token'
 ```
 
 If your Docker Hub repository is private, also create an image pull secret and attach it to the default service account or add it to the deployment:
@@ -72,13 +65,13 @@ kubectl -n freesync create secret docker-registry dockerhub-regcred \
 
 ## 3. Runtime state
 
-`FREESYNC_STATE` is still written to `/app/data/sync-state.json`, but the deployment now uses `emptyDir` storage. That means the file is writable during runtime and resets on pod restart.
+`runtime.statePath` should point at `/app/data/sync-state.json` (or another writable pod path). The deployment uses `emptyDir` storage there, so the file is writable during runtime and resets on pod restart.
 
 Because this service stores checkpoints in one JSON file, keep the deployment at `replicas: 1` unless you introduce shared locking or externalize state.
 
 ## 4. Build and publish flow
 
-Pushes to `main` publish commit-specific Docker images. Release tags publish the human-friendly version and update `latest`.
+Pushes to `main` publish the current `latest` image for fast internal rollout. Release tags also publish a human-friendly version tag.
 
 The workflow does this:
 
@@ -87,6 +80,7 @@ The workflow does this:
 
 Published tags from `main`:
 
+- `docker.io/<DOCKERHUB_NAMESPACE>/freesync:latest`
 - `docker.io/<DOCKERHUB_NAMESPACE>/freesync:sha-<git-sha>`
 
 Published tags from a git tag like `v0.7`:
@@ -95,18 +89,23 @@ Published tags from a git tag like `v0.7`:
 - `docker.io/<DOCKERHUB_NAMESPACE>/freesync:latest`
 - `docker.io/<DOCKERHUB_NAMESPACE>/freesync:sha-<git-sha>`
 
-Typical release flow:
+Typical internal-tool flow:
 
 1. Merge the desired code to `main`.
-2. Create and push a git tag, for example:
+2. Wait for GitHub Actions to publish a new `latest`.
+3. In Rancher, redeploy the workload if it is pinned to `docker.io/<DOCKERHUB_NAMESPACE>/freesync:latest`.
+
+Optional versioned release flow:
+
+1. Create and push a git tag, for example:
 
 ```bash
 git tag v0.7
 git push origin v0.7
 ```
 
-3. Wait for the workflow to publish `v0.7` and refresh `latest`.
-4. When ready, update the Rancher workload image to `docker.io/<DOCKERHUB_NAMESPACE>/freesync:v0.7`.
+2. Wait for the workflow to publish `v0.7` and refresh `latest`.
+3. When ready, update the Rancher workload image to `docker.io/<DOCKERHUB_NAMESPACE>/freesync:v0.7`.
 
 ## 5. Manual Rancher deployment
 
@@ -121,7 +120,7 @@ Then update the deployment to the image you want to run:
 
 ```bash
 kubectl -n freesync set image deployment/freesync \
-  freesync=docker.io/<DOCKERHUB_NAMESPACE>/freesync:sha-<git-sha>
+  freesync=docker.io/<DOCKERHUB_NAMESPACE>/freesync:latest
 ```
 
 Wait for rollout:

@@ -13,4 +13,4 @@ COPY --from=build /out/freesync /app/freesync
 
 EXPOSE 8080
 ENTRYPOINT ["/app/freesync"]
-CMD ["serve", "-listen", ":8080"]
+CMD ["serve"]

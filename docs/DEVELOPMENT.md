@@ -28,14 +28,15 @@ make build
 
 ```bash
 go run ./cmd/freesync run
-FREESYNC_CONFIG=config/dev.local.json go run ./cmd/freesync run
+go run ./cmd/freesync run -config config/dev.local.json
 # writes (default is dry-run until you pass -apply):
-FREESYNC_CONFIG=config/dev.local.json go run ./cmd/freesync run -apply
+go run ./cmd/freesync run -config config/dev.local.json -apply
 ```
 
 Config note:
 
 - `config/dev.local.json` now uses a top-level `files[]` array.
+- Runtime settings such as listen/token/state path now live under top-level `runtime`.
 - Each file entry defines its own `blue`/`green` OData URLs.
 - `files[].tables` is optional; omitting it auto-discovers the blue/green base-table intersection via `FileMaker_BaseTables`.
 - If `files[].tables` is present, that explicit list takes precedence over auto-discovery.

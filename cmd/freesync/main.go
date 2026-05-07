@@ -52,18 +52,34 @@ func main() {
 
 func runCLI(flagArgs []string) error {
 	configPath := defaultConfigPath()
-	statePath := defaultStatePath()
-	oneWay := strings.TrimSpace(os.Getenv("FREESYNC_ONE_WAY"))
-	verbose := envBool("FREESYNC_VERBOSE", false)
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	apply := fs.Bool("apply", false, "execute writes (PATCH/POST); default is dry-run")
-	fs.StringVar(&oneWay, "one-way", oneWay, "optional write direction filter: to-blue or to-green")
-	fs.BoolVar(&verbose, "verbose", verbose, "show page-level manifest and diagnostic logs")
+	var statePathFlag optionalString
+	var oneWayFlag optionalString
+	var verboseFlag optionalBool
+	var applyFlag optionalBool
+	fs.Var(&applyFlag, "apply", "execute writes (PATCH/POST); default is dry-run")
+	fs.Var(&oneWayFlag, "one-way", "optional write direction filter: to-blue or to-green")
+	fs.Var(&verboseFlag, "verbose", "show page-level manifest and diagnostic logs")
 	fs.StringVar(&configPath, "config", configPath, "path to JSON config")
-	fs.StringVar(&statePath, "state", statePath, "path to checkpoint file (JSON)")
+	fs.Var(&statePathFlag, "state", "path to checkpoint file (JSON)")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
+	cfg, err := config.LoadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	statePath := firstNonEmpty(
+		statePathFlag.Value(),
+		strings.TrimSpace(os.Getenv("FREESYNC_STATE")),
+		cfg.StateFilePath(),
+	)
+	oneWay := firstNonEmpty(
+		oneWayFlag.Value(),
+		strings.TrimSpace(os.Getenv("FREESYNC_ONE_WAY")),
+		cfg.OneWayMode(),
+	)
+	verbose := firstBool(verboseFlag, envOptionalBool("FREESYNC_VERBOSE"), cfg.VerboseLogging())
 	mode, err := normalizeOneWay(oneWay)
 	if err != nil {
 		return err
@@ -71,40 +87,54 @@ func runCLI(flagArgs []string) error {
 	// Table logs and run summary use the default logger; send to stdout so
 	// pipelines like `./freesync run ... | tail -n 30` include them (stderr is not piped).
 	log.SetOutput(os.Stdout)
-	return loadAndRunOnce(context.Background(), configPath, statePath, *apply, mode, verbose, log.Default())
+	return loadAndRunOnce(context.Background(), configPath, statePath, applyFlag.value, mode, verbose, log.Default())
 }
 
 func serveHTTP(flagArgs []string) error {
 	configPath := defaultConfigPath()
-	statePath := defaultStatePath()
-	listen := os.Getenv("FREESYNC_LISTEN")
-	if listen == "" {
-		listen = ":8080"
-	}
-	token := os.Getenv("FREESYNC_TRIGGER_TOKEN")
-	oneWayDefault := strings.TrimSpace(os.Getenv("FREESYNC_ONE_WAY"))
-	verboseDefault := envBool("FREESYNC_VERBOSE", false)
-	applyDefault := true
-	if v := strings.TrimSpace(os.Getenv("FREESYNC_APPLY")); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			return fmt.Errorf("FREESYNC_APPLY must be true/false: %w", err)
-		}
-		applyDefault = b
-	}
-
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	var statePathFlag optionalString
+	var listenFlag optionalString
+	var tokenFlag optionalString
+	var applyFlag optionalBool
+	var oneWayFlag optionalString
+	var verboseFlag optionalBool
 	fs.StringVar(&configPath, "config", configPath, "path to JSON config")
-	fs.StringVar(&statePath, "state", statePath, "path to checkpoint file (JSON)")
-	fs.StringVar(&listen, "listen", listen, "HTTP listen address")
-	fs.StringVar(&token, "token", token, "optional bearer token for POST /run")
-	fs.BoolVar(&applyDefault, "apply", applyDefault, "default apply mode for POST /run")
-	fs.StringVar(&oneWayDefault, "one-way", oneWayDefault, "default direction filter for POST /run: to-blue or to-green")
-	fs.BoolVar(&verboseDefault, "verbose", verboseDefault, "show page-level manifest and diagnostic logs")
+	fs.Var(&statePathFlag, "state", "path to checkpoint file (JSON)")
+	fs.Var(&listenFlag, "listen", "HTTP listen address")
+	fs.Var(&tokenFlag, "token", "optional bearer token for POST /run")
+	fs.Var(&applyFlag, "apply", "default apply mode for POST /run")
+	fs.Var(&oneWayFlag, "one-way", "default direction filter for POST /run: to-blue or to-green")
+	fs.Var(&verboseFlag, "verbose", "show page-level manifest and diagnostic logs")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
-	var err error
+	cfg, err := config.LoadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	statePath := firstNonEmpty(
+		statePathFlag.Value(),
+		strings.TrimSpace(os.Getenv("FREESYNC_STATE")),
+		cfg.StateFilePath(),
+	)
+	listen := firstNonEmpty(
+		listenFlag.Value(),
+		strings.TrimSpace(os.Getenv("FREESYNC_LISTEN")),
+		cfg.ListenAddr(),
+	)
+	token := firstNonEmpty(
+		tokenFlag.Value(),
+		cfg.TriggerBearerToken(),
+	)
+	oneWayDefault := firstNonEmpty(
+		oneWayFlag.Value(),
+		strings.TrimSpace(os.Getenv("FREESYNC_ONE_WAY")),
+		cfg.OneWayMode(),
+	)
+	verboseDefault := firstBool(verboseFlag, envOptionalBool("FREESYNC_VERBOSE"), cfg.VerboseLogging())
+	applyDefault := firstBool(applyFlag, envOptionalBool("FREESYNC_APPLY"), cfg.ApplyDefault())
+
 	oneWayDefault, err = normalizeOneWay(oneWayDefault)
 	if err != nil {
 		return err
@@ -303,18 +333,6 @@ func normalizeOneWay(raw string) (string, error) {
 	}
 }
 
-func envBool(name string, fallback bool) bool {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return fallback
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return fallback
-	}
-	return b
-}
-
 func parseCommand(args []string) (cmd string, before, after []string, ok bool) {
 	for i, a := range args {
 		if a == "run" || a == "serve" {
@@ -328,14 +346,18 @@ func defaultConfigPath() string {
 	if p := os.Getenv("FREESYNC_CONFIG"); p != "" {
 		return p
 	}
-	return "config/dev.example.json"
-}
-
-func defaultStatePath() string {
-	if p := os.Getenv("FREESYNC_STATE"); p != "" {
-		return p
+	for _, candidate := range []string{
+		"/app/config/dev.local.json",
+		"/app/config/prod.local.json",
+		"config/dev.local.json",
+		"config/prod.local.json",
+		"config/dev.example.json",
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
 	}
-	return "data/sync-state.json"
+	return "config/dev.example.json"
 }
 
 func authorized(r *http.Request, token string) bool {
@@ -353,4 +375,87 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+type optionalString struct {
+	set   bool
+	value string
+}
+
+func (o *optionalString) String() string {
+	return o.value
+}
+
+func (o *optionalString) Set(v string) error {
+	o.set = true
+	o.value = v
+	return nil
+}
+
+func (o *optionalString) Value() string {
+	if !o.set {
+		return ""
+	}
+	return o.value
+}
+
+type optionalBool struct {
+	set   bool
+	value bool
+}
+
+func (o *optionalBool) String() string {
+	if !o.set {
+		return ""
+	}
+	return strconv.FormatBool(o.value)
+}
+
+func (o *optionalBool) Set(v string) error {
+	o.set = true
+	if v == "" {
+		o.value = true
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return err
+	}
+	o.value = b
+	return nil
+}
+
+func (o *optionalBool) IsBoolFlag() bool {
+	return true
+}
+
+func envOptionalBool(name string) *bool {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return nil
+	}
+	return &b
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func firstBool(flag optionalBool, env *bool, fallback bool) bool {
+	if flag.set {
+		return flag.value
+	}
+	if env != nil {
+		return *env
+	}
+	return fallback
 }

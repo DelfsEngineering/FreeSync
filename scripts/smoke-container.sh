@@ -8,19 +8,16 @@ fi
 
 IMAGE="${IMAGE:-freesync:smoke}"
 PORT="${PORT:-18080}"
-TOKEN="${FREESYNC_TRIGGER_TOKEN:-smoketoken}"
+TOKEN="${TOKEN:-smoketoken}"
 
 mkdir -p data
 
 docker build -t "${IMAGE}" .
 CID=$(docker run -d \
   -p "${PORT}:8080" \
-  -e FREESYNC_CONFIG=/app/config/dev.local.json \
-  -e FREESYNC_STATE=/app/data/sync-state.json \
-  -e FREESYNC_TRIGGER_TOKEN="${TOKEN}" \
   -v "$(pwd)/config:/app/config:ro" \
   -v "$(pwd)/data:/app/data" \
-  "${IMAGE}")
+  "${IMAGE}" serve -token "${TOKEN}")
 
 cleanup() {
   docker rm -f "${CID}" >/dev/null 2>&1 || true
